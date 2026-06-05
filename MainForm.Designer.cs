@@ -112,7 +112,7 @@ partial class MainForm
         btnLogin.Click += BtnLogin_Click; cardConn.Controls.Add(btnLogin);
         btnTest = new Button { Text = "Verbindung testen", Left = 268, Top = 44, Width = 170 };
         btnTest.Click += BtnTest_Click; cardConn.Controls.Add(btnTest);
-        Lbl(cardConn, "Die Verbindungsdaten werden im Tab „Einstellungen" gepflegt.", 16, 80, 740, Theme.Subtitle(), Theme.Subtle);
+        Lbl(cardConn, "Die Verbindungsdaten werden im Tab \"Einstellungen\" gepflegt.", 16, 80, 740, Theme.Subtitle(), Theme.Subtle);
 
         Section(cardConn, "Schritt 2 – Archiv & Datumsfeld", 16, 108);
         Lbl(cardConn, "Archiv:", 16, 140, 90);

@@ -88,7 +88,7 @@ public partial class MainForm : Form
             Log("Das Standardprofil kann nicht gelöscht werden.");
             return;
         }
-        if (MessageBox.Show($"Profil „{_activeProfile}" löschen?", "Profil löschen",
+        if (MessageBox.Show($"Profil \"{_activeProfile}\" löschen?", "Profil löschen",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
         ProfileManager.Delete(_activeProfile);
