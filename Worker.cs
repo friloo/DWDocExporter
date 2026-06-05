@@ -12,7 +12,7 @@ namespace DwDocExport;
 
 /// <summary>
 /// Der Hintergrunddienst (Windows Worker Service). Exportiert alle Dokumente
-/// eines DocuWare-Schranks im Originalformat – dateityp-neutral, fortsetzbar,
+/// eines DocuWare-Archivs im Originalformat – dateityp-neutral, fortsetzbar,
 /// optional parallel und inkrementell.
 /// </summary>
 public sealed class Worker : BackgroundService
@@ -87,7 +87,7 @@ public sealed class Worker : BackgroundService
         });
 
         await client.AuthenticateAsync(ct).ConfigureAwait(false);
-        _logger.LogInformation("Authentifizierung erfolgreich. Beginne Export aus Schrank {Fc}.", opt.FileCabinetId);
+        _logger.LogInformation("Authentifizierung erfolgreich. Beginne Export aus Archiv {Fc}.", opt.FileCabinetId);
 
         Directory.CreateDirectory(opt.OutputRoot);
 

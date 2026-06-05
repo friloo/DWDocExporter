@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace DwDocExport;
 
 /// <summary>
-/// Hauptfenster (GUI-Modus). Ablauf: erst anmelden und Schrank im Dropdown
+/// Hauptfenster (GUI-Modus). Ablauf: erst anmelden und Archiv im Dropdown
 /// wählen, dann Einstellungen speichern und Dienst installieren/starten.
 /// Alle Aktionen sind gegen Ausnahmen abgesichert (keine Abstürze).
 /// </summary>
@@ -17,8 +17,8 @@ public partial class MainForm : Form
 {
     private ExporterOptions _opt;
 
-    /// <summary>Eintrag der Schrank-ComboBox: Anzeige = Name, Wert = Id.</summary>
-    private sealed record CabinetItem(string Id, string Name)
+    /// <summary>Eintrag der Archiv-ComboBox: Anzeige = Name, Wert = Id.</summary>
+    private sealed record ArchiveItem(string Id, string Name)
     {
         public override string ToString() => Name;
     }
@@ -64,9 +64,9 @@ public partial class MainForm : Form
 
         if (!string.IsNullOrWhiteSpace(_opt.FileCabinetId))
         {
-            cboFileCabinet.Items.Clear();
-            cboFileCabinet.Items.Add(new CabinetItem(_opt.FileCabinetId, $"(gespeichert) {_opt.FileCabinetId}"));
-            cboFileCabinet.SelectedIndex = 0;
+            cboArchive.Items.Clear();
+            cboArchive.Items.Add(new ArchiveItem(_opt.FileCabinetId, $"(gespeichert) {_opt.FileCabinetId}"));
+            cboArchive.SelectedIndex = 0;
         }
     }
 
@@ -94,7 +94,7 @@ public partial class MainForm : Form
         _opt.WriteMetadataSidecar = chkMetadata.Checked;
         _opt.Incremental = chkIncremental.Checked;
 
-        if (cboFileCabinet.SelectedItem is CabinetItem ci)
+        if (cboArchive.SelectedItem is ArchiveItem ci)
             _opt.FileCabinetId = ci.Id;
 
         // Logziel ggf. an neue Einstellung anpassen.
@@ -108,10 +108,8 @@ public partial class MainForm : Form
         return value;
     }
 
-    /// <summary>
-    /// Prüft die Konfiguration. Liefert eine Liste von Problemen (leer = ok).
-    /// </summary>
-    private List<string> Validate(bool requireCabinet)
+    /// <summary>Prüft die Konfiguration. Liefert eine Liste von Problemen (leer = ok).</summary>
+    private List<string> Validate(bool requireArchive)
     {
         var problems = new List<string>();
 
@@ -140,16 +138,15 @@ public partial class MainForm : Form
         if (string.IsNullOrWhiteSpace(_opt.StateDbPath))
             problems.Add("Status-DB-Pfad darf nicht leer sein.");
 
-        if (requireCabinet && string.IsNullOrWhiteSpace(_opt.FileCabinetId))
-            problems.Add("Bitte zuerst einen Aktenschrank wählen.");
+        if (requireArchive && string.IsNullOrWhiteSpace(_opt.FileCabinetId))
+            problems.Add("Bitte zuerst ein Archiv wählen.");
 
         return problems;
     }
 
-    /// <summary>Validiert und protokolliert; gibt true zurück, wenn alles ok ist.</summary>
-    private bool ValidateAndReport(bool requireCabinet)
+    private bool ValidateAndReport(bool requireArchive)
     {
-        var problems = Validate(requireCabinet);
+        var problems = Validate(requireArchive);
         if (problems.Count == 0)
             return true;
 
@@ -166,36 +163,36 @@ public partial class MainForm : Form
     private async void BtnLogin_Click(object? sender, EventArgs e)
     {
         ReadUiIntoOptions();
-        if (!ValidateAndReport(requireCabinet: false))
+        if (!ValidateAndReport(requireArchive: false))
             return;
 
         await RunGuardedAsync("Anmelden", async ct =>
         {
             using var client = new DocuWareClient(_opt, Log);
             await client.AuthenticateAsync(ct);
-            Log("Anmeldung erfolgreich. Lade Aktenschränke …");
+            Log("Anmeldung erfolgreich. Lade Archive …");
 
             var cabinets = await client.GetFileCabinetsAsync(ct);
-            cboFileCabinet.Items.Clear();
+            cboArchive.Items.Clear();
             foreach (var c in cabinets)
-                cboFileCabinet.Items.Add(new CabinetItem(c.Id, c.Name));
+                cboArchive.Items.Add(new ArchiveItem(c.Id, c.Name));
 
-            if (cboFileCabinet.Items.Count > 0)
+            if (cboArchive.Items.Count > 0)
             {
                 var idx = 0;
-                for (var i = 0; i < cboFileCabinet.Items.Count; i++)
-                    if (cboFileCabinet.Items[i] is CabinetItem it && it.Id == _opt.FileCabinetId)
+                for (var i = 0; i < cboArchive.Items.Count; i++)
+                    if (cboArchive.Items[i] is ArchiveItem it && it.Id == _opt.FileCabinetId)
                         idx = i;
-                cboFileCabinet.SelectedIndex = idx;
+                cboArchive.SelectedIndex = idx;
             }
-            Log($"{cabinets.Count} Aktenschrank/Schränke geladen.");
+            Log($"{cabinets.Count} Archiv(e) geladen.");
         });
     }
 
     private async void BtnLoadFields_Click(object? sender, EventArgs e)
     {
         ReadUiIntoOptions();
-        if (!ValidateAndReport(requireCabinet: true))
+        if (!ValidateAndReport(requireArchive: true))
             return;
 
         await RunGuardedAsync("Indexfelder laden", async ct =>
@@ -217,7 +214,7 @@ public partial class MainForm : Form
     private async void BtnTest_Click(object? sender, EventArgs e)
     {
         ReadUiIntoOptions();
-        if (!ValidateAndReport(requireCabinet: false))
+        if (!ValidateAndReport(requireArchive: false))
             return;
 
         await RunGuardedAsync("Verbindung testen", async ct =>
@@ -229,11 +226,11 @@ public partial class MainForm : Form
             if (!string.IsNullOrWhiteSpace(_opt.FileCabinetId))
             {
                 var count = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct);
-                Log($"Schrank enthält {count} Dokument(e).");
+                Log($"Archiv enthält {count} Dokument(e).");
             }
             else
             {
-                Log("Kein Schrank gewählt – nur Anmeldung getestet.");
+                Log("Kein Archiv gewählt – nur Anmeldung getestet.");
             }
         });
     }
@@ -243,7 +240,7 @@ public partial class MainForm : Form
         try
         {
             ReadUiIntoOptions();
-            if (!ValidateAndReport(requireCabinet: false))
+            if (!ValidateAndReport(requireArchive: false))
                 return;
             _opt.Save();
             Log($"Konfiguration gespeichert: {ExporterOptions.DefaultPath}");
@@ -251,6 +248,22 @@ public partial class MainForm : Form
         catch (Exception ex)
         {
             Log($"Fehler beim Speichern: {ex.Message}");
+        }
+    }
+
+    private void BtnBrowseOutput_Click(object? sender, EventArgs e)
+    {
+        try
+        {
+            using var dlg = new FolderBrowserDialog { Description = "Ausgabeordner wählen" };
+            if (!string.IsNullOrWhiteSpace(txtOutputRoot.Text) && Directory.Exists(txtOutputRoot.Text))
+                dlg.SelectedPath = txtOutputRoot.Text;
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+                txtOutputRoot.Text = dlg.SelectedPath;
+        }
+        catch (Exception ex)
+        {
+            Log($"Ordnerauswahl fehlgeschlagen: {ex.Message}");
         }
     }
 
@@ -273,9 +286,9 @@ public partial class MainForm : Form
         }
     }
 
-    private void CboFileCabinet_SelectedIndexChanged(object? sender, EventArgs e)
+    private void CboArchive_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        if (cboFileCabinet.SelectedItem is CabinetItem ci)
+        if (cboArchive.SelectedItem is ArchiveItem ci)
             _opt.FileCabinetId = ci.Id;
     }
 
@@ -300,7 +313,7 @@ public partial class MainForm : Form
         try
         {
             ReadUiIntoOptions();
-            if (!ValidateAndReport(requireCabinet: true))
+            if (!ValidateAndReport(requireArchive: true))
                 return;
             _opt.Save();
             Log("Konfiguration gespeichert.");
@@ -321,7 +334,7 @@ public partial class MainForm : Form
         try
         {
             ReadUiIntoOptions();
-            if (!ValidateAndReport(requireCabinet: true))
+            if (!ValidateAndReport(requireArchive: true))
                 return;
             _opt.Save();
 
@@ -369,7 +382,11 @@ public partial class MainForm : Form
     {
         try
         {
-            lblServiceStatus.Text = $"Dienststatus: {ServiceManager.GetStatus()}";
+            var status = ServiceManager.GetStatus();
+            lblServiceStatus.Text = $"Dienststatus: {status}";
+            lblServiceStatus.ForeColor =
+                status == "Running" ? Theme.Success :
+                status == "Nicht installiert" ? Theme.Subtle : Theme.Text;
 
             var dbPath = txtStateDb.Text.Trim();
             if (!string.IsNullOrWhiteSpace(dbPath) && File.Exists(dbPath))
@@ -380,6 +397,7 @@ public partial class MainForm : Form
                     var done = store.CountDone();
                     var err = store.CountError();
                     lblProgress.Text = $"Fortschritt: {done} erledigt, {err} Fehler";
+                    lblProgress.ForeColor = err > 0 ? Theme.Danger : Theme.Text;
                 }
                 catch
                 {
@@ -389,6 +407,7 @@ public partial class MainForm : Form
             else
             {
                 lblProgress.Text = "Fortschritt: (keine DB)";
+                lblProgress.ForeColor = Theme.Subtle;
             }
         }
         catch

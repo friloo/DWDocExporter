@@ -33,7 +33,7 @@ public sealed class DownloadStream : IDisposable
 /// <summary>Eine Seite Dokumente plus optionalem Folge-Link (HATEOAS "next").</summary>
 public sealed record DocumentPage(List<DwDocument> Items, string? NextUrl);
 
-/// <summary>Kurzinfo zu einem Dateischrank (Aktenschrank) – ohne Baskets.</summary>
+/// <summary>Kurzinfo zu einem Archiv (DocuWare File Cabinet) – ohne Baskets.</summary>
 public sealed record FileCabinetInfo(string Id, string Name);
 
 /// <summary>
@@ -442,7 +442,7 @@ public sealed class DocuWareClient : IDisposable
     //  Plattform-Operationen
     // =====================================================================
 
-    /// <summary>Liefert alle Dateischränke (echte Aktenschränke, keine Baskets).</summary>
+    /// <summary>Liefert alle Archive (echte File Cabinets, keine Baskets).</summary>
     public async Task<List<FileCabinetInfo>> GetFileCabinetsAsync(CancellationToken ct)
     {
         using var resp = await SendWithRetryAsync(
@@ -472,7 +472,7 @@ public sealed class DocuWareClient : IDisposable
         return list;
     }
 
-    /// <summary>Liefert die Indexfeld-Namen (DBName) eines Schranks.</summary>
+    /// <summary>Liefert die Indexfeld-Namen (DBName) eines Archivs.</summary>
     public async Task<List<string>> GetFieldNamesAsync(string fileCabinetId, CancellationToken ct)
     {
         using var resp = await SendWithRetryAsync(
@@ -497,7 +497,7 @@ public sealed class DocuWareClient : IDisposable
         return names;
     }
 
-    /// <summary>Liefert die Gesamtzahl der Dokumente im Schrank.</summary>
+    /// <summary>Liefert die Gesamtzahl der Dokumente im Archiv.</summary>
     public async Task<int> GetDocumentCountAsync(string fileCabinetId, CancellationToken ct)
     {
         var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents?start=0&count=1&calculateTotalCount=true";

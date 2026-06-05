@@ -13,21 +13,21 @@
 
 ---
 
-**DwDocExport** holt **alle Dokumente** eines DocuWare-Aktenschranks über die
+**DwDocExport** holt **alle Dokumente** eines DocuWare-Archivs über die
 offizielle **Platform REST API** heraus – und zwar **im Originalformat** und für
 **jeden Dateityp** (PDF, MSG, EML, DOCX, XLSX, JPG, ZIP …). Der Download nutzt
 `targetFileType=Auto`, sodass DocuWare die Originaldatei liefert; der Dateiname
 kommt aus dem `Content-Disposition`-Header.
 
 > 💡 **Nichts ist auf E-Mails fest verdrahtet.** Der erste Anwendungsfall ist ein
-> **Mailarchiv (EML/MSG)**, aber das Tool funktioniert mit jedem Schrank und jedem
+> **Mailarchiv (EML/MSG)**, aber das Tool funktioniert mit jedem Archiv und jedem
 > Dateityp.
 
 ---
 
 ## ✨ Features
 
-- 🗂️ **Vollständiger Export** eines Aktenschranks im **Originalformat**, dateityp-neutral
+- 🗂️ **Vollständiger Export** eines Archivs im **Originalformat**, dateityp-neutral
 - ☁️🏢 **Cloud *und* On-Premise** – Token-Login (Identity Service) **und** klassischer Cookie-Login
 - 🔐 **App-Registrierung** (OAuth Client-Credentials) als moderne Alternative zum Passwort-Grant
 - 🔀 **`AuthMode=Auto`** wählt automatisch das richtige Verfahren (Token → Fallback Cookie)
@@ -52,7 +52,7 @@ kommt aus dem `Content-Disposition`-Header.
 
 ![DwDocExport GUI](docs/gui-mockup.png)
 
-<sub>Layout-Vorschau der GUI (Anmeldung, Schrank-Auswahl, alle Einstellungen, Dienststeuerung, Log).</sub>
+<sub>Layout-Vorschau der GUI (Anmeldung, Archiv-Auswahl, alle Einstellungen, Dienststeuerung, Log).</sub>
 
 </div>
 
@@ -69,7 +69,7 @@ kommt aus dem `Content-Disposition`-Header.
    `bin\Release\net8.0-windows\win-x64\publish\DwDocExport.exe`
 2. **EXE auf den Zielrechner kopieren** und per Doppelklick starten (GUI).
    Beim Start einmal die **UAC-Abfrage** bestätigen (Adminrechte für die Dienstverwaltung).
-3. In der GUI: **Anmelden → Schrank im Dropdown wählen → Speichern → Dienst installieren → Dienst starten.**
+3. In der GUI: **Anmelden → Archiv im Dropdown wählen → Speichern → Dienst installieren → Dienst starten.**
 4. Im **Ausgabeordner** prüfen, ob die echten Originaldateien (z. B. `*.eml`/`*.msg`) ankommen.
 
 ---
@@ -139,7 +139,7 @@ der GUI editierbar und mit Platzhaltern vorbelegt.
 | `AuthMode` | `Auto` / `Cookie` / `Token` | `Auto` |
 | `OAuthClientId` | Eigene Client-ID (leer = `docuware.platform.net.client`) | `""` |
 | `OAuthClientSecret` | Client-Secret einer App-Registrierung → Client-Credentials-Grant (verschlüsselt) | `""` |
-| `FileCabinetId` | Ziel-Aktenschrank (per Dropdown gewählt) | `""` |
+| `FileCabinetId` | Ziel-Archiv (per Dropdown gewählt) | `""` |
 | `OutputRoot` | Zielordner für Exporte | `C:\Export\DocuWare` |
 | `StateDbPath` | SQLite-Statusdatenbank | `C:\Export\DocuWare\export-state.db` |
 | `LogFilePath` | Logdatei (leer = `OutputRoot\dwdocexport.log`) | `""` |
@@ -196,9 +196,9 @@ der GUI editierbar und mit Platzhaltern vorbelegt.
 
 | Schaltfläche | Funktion |
 |--------------|----------|
-| **Anmelden / Schränke laden** | Meldet gemäß `AuthMode` an und füllt das Dropdown mit allen **Aktenschränken** (Baskets ausgeschlossen) – keine ID nötig |
-| **Indexfelder laden** | Feldnamen des gewählten Schranks ins **Datumsfeld**-Dropdown (leer = keine Datumsordner) |
-| **Verbindung testen** | Anmeldung + Anzahl Dokumente des Schranks |
+| **Anmelden / Archive laden** | Meldet gemäß `AuthMode` an und füllt das Dropdown mit allen **Archiven** (Baskets ausgeschlossen) – keine ID nötig |
+| **Indexfelder laden** | Feldnamen des gewählten Archivs ins **Datumsfeld**-Dropdown (leer = keine Datumsordner) |
+| **Verbindung testen** | Anmeldung + Anzahl Dokumente des Archivs |
 | **Speichern** | Schreibt `config.json` |
 | **Dienst installieren / starten / stoppen / deinstallieren** | Steuert den Windows-Dienst (vor *Installieren*/*Starten* wird automatisch gespeichert) |
 
@@ -246,7 +246,7 @@ Anmelden (Token/Cookie)
 | `MainForm.cs` / `.Designer.cs` | WinForms-Oberfläche und Logik |
 | `ExporterOptions.cs` | Laden/Speichern der `config.json` (mit Verschlüsselung) |
 | `SecretProtector.cs` | DPAPI-Ver-/Entschlüsselung geheimer Werte |
-| `DocuWareClient.cs` | REST-Client: Token-/Cookie-/Client-Credentials-Auth, Schränke, Felder, Seiten, Streaming-Download, Sektionen |
+| `DocuWareClient.cs` | REST-Client: Token-/Cookie-/Client-Credentials-Auth, Archive, Felder, Seiten, Streaming-Download, Sektionen |
 | `PathRules.cs` | Reine Pfad-/Namenslogik (Datums-/Hash-Ordner, lange Pfade) |
 | `ExportStateStore.cs` | SQLite-Statusspeicher (WAL) inkl. Lauf-Metadaten |
 | `FileLog.cs` | Datei-Log + ILogger-Provider |
@@ -277,7 +277,7 @@ Anmelden (Token/Cookie)
 
 - [ ] Server-seitiger inkrementeller Export per Suchabfrage (nur geänderte seit Zeitpunkt)
 - [ ] Code-Signing der EXE und MSI-/Inno-Setup-Installer
-- [ ] Mehrere Schränke in einem Lauf
+- [ ] Mehrere Archive in einem Lauf
 
 ---
 
@@ -293,7 +293,7 @@ Ja. Bereits exportierte Dokumente sind in der SQLite-DB als `done` markiert und
 werden übersprungen; geschrieben wird erst `*.part`, dann umbenannt.
 
 **Muss ich die FileCabinet-ID kennen?**
-Nein – nach dem Anmelden wählst du den Schrank einfach im Dropdown.
+Nein – nach dem Anmelden wählst du das Archiv einfach im Dropdown.
 
 ---
 
