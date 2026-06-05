@@ -9,15 +9,18 @@ using System.Windows.Forms;
 namespace DwDocExport;
 
 /// <summary>
-/// Hauptfenster (GUI-Modus). Ablauf: erst anmelden und Archiv im Dropdown
-/// wählen, dann Einstellungen speichern und Dienst installieren/starten.
-/// Alle Aktionen sind gegen Ausnahmen abgesichert (keine Abstürze).
+/// Hauptfenster (GUI). Bindet alle Einstellungen an ein PropertyGrid, verwaltet
+/// Profile, steuert Anmeldung/Archivauswahl, den Windows-Dienst sowie direkte
+/// Läufe (Export/Trockenlauf/Verifizieren/Fehler erneut) mit Fortschrittsanzeige.
 /// </summary>
 public partial class MainForm : Form
 {
     private ExporterOptions _opt;
+    private string _activeProfile = ProfileManager.DefaultProfileName;
+    private bool _loadingProfiles;
+    private bool _running;
+    private CancellationTokenSource? _cts;
 
-    /// <summary>Eintrag der Archiv-ComboBox: Anzeige = Name, Wert = Id.</summary>
     private sealed record ArchiveItem(string Id, string Name)
     {
         public override string ToString() => Name;
@@ -25,164 +28,171 @@ public partial class MainForm : Form
 
     public MainForm()
     {
-        InitializeComponent();
         _opt = ExporterOptions.Load();
-        // Datei-Log auch für GUI-Meldungen aktivieren.
-        FileLog.Configure(_opt.EffectiveLogPath);
-        LoadOptionsIntoUi();
+        Theme.SetDark(_opt.DarkMode);   // muss vor dem UI-Aufbau gesetzt sein
+        InitializeComponent();
+
+        propGrid.SelectedObject = _opt;
+        RefreshProfiles();
+        FileLog.Configure(_opt.EffectiveLogPath, FileLog.ParseLevel(_opt.MinLogLevel), _opt.LogMaxSizeMb);
+
+        Theme.Apply(tabs);
+        Theme.ApplyToGrid(propGrid);
+        ShowSavedArchive();
+        SetRunningUi(false);
         statusTimer.Start();
     }
 
     // =====================================================================
-    //  Konfiguration <-> Oberfläche
+    //  Profile
     // =====================================================================
 
-    private void LoadOptionsIntoUi()
+    private void RefreshProfiles()
     {
-        txtServer.Text = _opt.Server;
-        txtOrganization.Text = _opt.Organization;
-        txtUser.Text = _opt.User;
-        txtPassword.Text = _opt.Password;
-        cboAuthMode.SelectedItem = _opt.AuthMode.ToString();
-        if (cboAuthMode.SelectedIndex < 0) cboAuthMode.SelectedIndex = 0;
-        txtOAuthClientId.Text = _opt.OAuthClientId;
-        txtOAuthClientSecret.Text = _opt.OAuthClientSecret;
+        _loadingProfiles = true;
+        cboProfile.Items.Clear();
+        foreach (var p in ProfileManager.ListProfiles())
+            cboProfile.Items.Add(p);
+        cboProfile.SelectedItem = _activeProfile;
+        if (cboProfile.SelectedIndex < 0 && cboProfile.Items.Count > 0)
+            cboProfile.SelectedIndex = 0;
+        _loadingProfiles = false;
+    }
 
-        txtOutputRoot.Text = _opt.OutputRoot;
-        txtStateDb.Text = _opt.StateDbPath;
-        txtLogFile.Text = _opt.LogFilePath;
-        cboDateField.Text = _opt.DateFieldName;
-        numHashDepth.Value = Clamp(_opt.FolderHashDepth, numHashDepth.Minimum, numHashDepth.Maximum);
-        numPageSize.Value = Clamp(_opt.PageSize, numPageSize.Minimum, numPageSize.Maximum);
-        numDelay.Value = Clamp(_opt.DelayMs, numDelay.Minimum, numDelay.Maximum);
-        numRetries.Value = Clamp(_opt.MaxRetries, numRetries.Minimum, numRetries.Maximum);
-        numParallel.Value = Clamp(_opt.MaxParallelDownloads, numParallel.Minimum, numParallel.Maximum);
-        numRescan.Value = Clamp(_opt.RescanIntervalMinutes, numRescan.Minimum, numRescan.Maximum);
-        chkPerSection.Checked = _opt.DownloadPerSection;
-        chkMetadata.Checked = _opt.WriteMetadataSidecar;
-        chkIncremental.Checked = _opt.Incremental;
+    private void CboProfile_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (_loadingProfiles) return;
+        _activeProfile = cboProfile.SelectedItem?.ToString() ?? ProfileManager.DefaultProfileName;
+        _opt = ProfileManager.Load(_activeProfile);
+        propGrid.SelectedObject = _opt;
+        FileLog.Configure(_opt.EffectiveLogPath, FileLog.ParseLevel(_opt.MinLogLevel), _opt.LogMaxSizeMb);
+        cboArchive.Items.Clear();
+        ShowSavedArchive();
+        Log($"Profil geladen: {_activeProfile}");
+    }
 
+    private void BtnProfileNew_Click(object? sender, EventArgs e)
+    {
+        var name = Prompt.Text(this, "Neues Profil", "Name des neuen Profils:");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        ProfileManager.Save(new ExporterOptions(), name);
+        RefreshProfiles();
+        cboProfile.SelectedItem = name;
+        Log($"Profil angelegt: {name}");
+    }
+
+    private void BtnProfileDelete_Click(object? sender, EventArgs e)
+    {
+        if (_activeProfile.Equals(ProfileManager.DefaultProfileName, StringComparison.OrdinalIgnoreCase))
+        {
+            Log("Das Standardprofil kann nicht gelöscht werden.");
+            return;
+        }
+        if (MessageBox.Show($"Profil „{_activeProfile}" löschen?", "Profil löschen",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        ProfileManager.Delete(_activeProfile);
+        _activeProfile = ProfileManager.DefaultProfileName;
+        RefreshProfiles();
+        Log("Profil gelöscht.");
+    }
+
+    private void BtnProfileSave_Click(object? sender, EventArgs e)
+    {
+        var name = Prompt.Text(this, "Als Profil speichern", "Profilname:", _activeProfile);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        ProfileManager.Save(_opt, name);
+        RefreshProfiles();
+        cboProfile.SelectedItem = name;
+        Log($"Als Profil gespeichert: {name}");
+    }
+
+    // =====================================================================
+    //  Speichern / Laden
+    // =====================================================================
+
+    private void BtnSave_Click(object? sender, EventArgs e)
+    {
+        try
+        {
+            if (!ValidateAndReport(false)) return;
+            _opt.Save(ProfileManager.PathFor(_activeProfile));
+            FileLog.Configure(_opt.EffectiveLogPath, FileLog.ParseLevel(_opt.MinLogLevel), _opt.LogMaxSizeMb);
+            Log($"Einstellungen gespeichert ({_activeProfile}).");
+        }
+        catch (Exception ex) { Log($"Fehler beim Speichern: {ex.Message}"); }
+    }
+
+    private void BtnReload_Click(object? sender, EventArgs e)
+    {
+        _opt = ProfileManager.Load(_activeProfile);
+        propGrid.SelectedObject = _opt;
+        cboArchive.Items.Clear();
+        ShowSavedArchive();
+        Log("Einstellungen neu geladen.");
+    }
+
+    private void ShowSavedArchive()
+    {
         if (!string.IsNullOrWhiteSpace(_opt.FileCabinetId))
         {
-            cboArchive.Items.Clear();
             cboArchive.Items.Add(new ArchiveItem(_opt.FileCabinetId, $"(gespeichert) {_opt.FileCabinetId}"));
             cboArchive.SelectedIndex = 0;
         }
     }
 
-    private void ReadUiIntoOptions()
-    {
-        _opt.Server = txtServer.Text.Trim();
-        _opt.Organization = txtOrganization.Text.Trim();
-        _opt.User = txtUser.Text;
-        _opt.Password = txtPassword.Text;
-        _opt.AuthMode = Enum.TryParse<AuthMode>(cboAuthMode.SelectedItem?.ToString(), out var am) ? am : AuthMode.Auto;
-        _opt.OAuthClientId = txtOAuthClientId.Text.Trim();
-        _opt.OAuthClientSecret = txtOAuthClientSecret.Text;
+    // =====================================================================
+    //  Validierung
+    // =====================================================================
 
-        _opt.OutputRoot = txtOutputRoot.Text.Trim();
-        _opt.StateDbPath = txtStateDb.Text.Trim();
-        _opt.LogFilePath = txtLogFile.Text.Trim();
-        _opt.DateFieldName = cboDateField.Text.Trim();
-        _opt.FolderHashDepth = (int)numHashDepth.Value;
-        _opt.PageSize = (int)numPageSize.Value;
-        _opt.DelayMs = (int)numDelay.Value;
-        _opt.MaxRetries = (int)numRetries.Value;
-        _opt.MaxParallelDownloads = (int)numParallel.Value;
-        _opt.RescanIntervalMinutes = (int)numRescan.Value;
-        _opt.DownloadPerSection = chkPerSection.Checked;
-        _opt.WriteMetadataSidecar = chkMetadata.Checked;
-        _opt.Incremental = chkIncremental.Checked;
-
-        if (cboArchive.SelectedItem is ArchiveItem ci)
-            _opt.FileCabinetId = ci.Id;
-
-        // Logziel ggf. an neue Einstellung anpassen.
-        FileLog.Configure(_opt.EffectiveLogPath);
-    }
-
-    private static decimal Clamp(int value, decimal min, decimal max)
-    {
-        if (value < min) return min;
-        if (value > max) return max;
-        return value;
-    }
-
-    /// <summary>Prüft die Konfiguration. Liefert eine Liste von Problemen (leer = ok).</summary>
     private List<string> Validate(bool requireArchive)
     {
-        var problems = new List<string>();
-
+        var p = new List<string>();
         if (string.IsNullOrWhiteSpace(_opt.Server) ||
             !Uri.TryCreate(_opt.Server, UriKind.Absolute, out var uri) ||
             (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-            problems.Add("Server muss eine gültige http(s)-URL sein.");
-
-        if (string.IsNullOrWhiteSpace(_opt.User))
-            problems.Add("Benutzer darf nicht leer sein.");
-
-        if (string.IsNullOrWhiteSpace(_opt.OutputRoot))
-            problems.Add("Ausgabeordner darf nicht leer sein.");
+            p.Add("Server muss eine gültige http(s)-URL sein.");
+        if (string.IsNullOrWhiteSpace(_opt.User)) p.Add("Benutzer darf nicht leer sein.");
+        if (string.IsNullOrWhiteSpace(_opt.OutputRoot)) p.Add("Ausgabeordner darf nicht leer sein.");
         else
         {
-            try
-            {
-                Directory.CreateDirectory(_opt.OutputRoot);
-            }
-            catch (Exception ex)
-            {
-                problems.Add($"Ausgabeordner nicht beschreibbar: {ex.Message}");
-            }
+            try { Directory.CreateDirectory(_opt.OutputRoot); }
+            catch (Exception ex) { p.Add($"Ausgabeordner nicht beschreibbar: {ex.Message}"); }
         }
-
-        if (string.IsNullOrWhiteSpace(_opt.StateDbPath))
-            problems.Add("Status-DB-Pfad darf nicht leer sein.");
-
-        if (requireArchive && string.IsNullOrWhiteSpace(_opt.FileCabinetId))
-            problems.Add("Bitte zuerst ein Archiv wählen.");
-
-        return problems;
+        if (string.IsNullOrWhiteSpace(_opt.StateDbPath)) p.Add("Status-DB-Pfad darf nicht leer sein.");
+        if (requireArchive && string.IsNullOrWhiteSpace(_opt.FileCabinetId)) p.Add("Bitte zuerst ein Archiv wählen.");
+        return p;
     }
 
     private bool ValidateAndReport(bool requireArchive)
     {
         var problems = Validate(requireArchive);
-        if (problems.Count == 0)
-            return true;
-
+        if (problems.Count == 0) return true;
         Log("Konfiguration unvollständig:");
-        foreach (var p in problems)
-            Log("  • " + p);
+        foreach (var x in problems) Log("  • " + x);
         return false;
     }
 
     // =====================================================================
-    //  Schaltflächen
+    //  Anmeldung / Archiv / Felder
     // =====================================================================
 
     private async void BtnLogin_Click(object? sender, EventArgs e)
     {
-        ReadUiIntoOptions();
-        if (!ValidateAndReport(requireArchive: false))
-            return;
-
+        if (!ValidateAndReport(false)) return;
         await RunGuardedAsync("Anmelden", async ct =>
         {
             using var client = new DocuWareClient(_opt, Log);
             await client.AuthenticateAsync(ct);
             Log("Anmeldung erfolgreich. Lade Archive …");
-
             var cabinets = await client.GetFileCabinetsAsync(ct);
             cboArchive.Items.Clear();
-            foreach (var c in cabinets)
-                cboArchive.Items.Add(new ArchiveItem(c.Id, c.Name));
-
+            foreach (var c in cabinets) cboArchive.Items.Add(new ArchiveItem(c.Id, c.Name));
             if (cboArchive.Items.Count > 0)
             {
                 var idx = 0;
                 for (var i = 0; i < cboArchive.Items.Count; i++)
-                    if (cboArchive.Items[i] is ArchiveItem it && it.Id == _opt.FileCabinetId)
-                        idx = i;
+                    if (cboArchive.Items[i] is ArchiveItem it && it.Id == _opt.FileCabinetId) idx = i;
                 cboArchive.SelectedIndex = idx;
             }
             Log($"{cabinets.Count} Archiv(e) geladen.");
@@ -191,21 +201,16 @@ public partial class MainForm : Form
 
     private async void BtnLoadFields_Click(object? sender, EventArgs e)
     {
-        ReadUiIntoOptions();
-        if (!ValidateAndReport(requireArchive: true))
-            return;
-
+        if (!ValidateAndReport(true)) return;
         await RunGuardedAsync("Indexfelder laden", async ct =>
         {
             using var client = new DocuWareClient(_opt, Log);
             await client.AuthenticateAsync(ct);
             var fields = await client.GetFieldNamesAsync(_opt.FileCabinetId, ct);
-
             var current = cboDateField.Text;
             cboDateField.Items.Clear();
-            cboDateField.Items.Add(""); // leer = keine Datumsordner
-            foreach (var f in fields)
-                cboDateField.Items.Add(f);
+            cboDateField.Items.Add("");
+            foreach (var f in fields) cboDateField.Items.Add(f);
             cboDateField.Text = current;
             Log($"{fields.Count} Indexfelder geladen.");
         });
@@ -213,95 +218,152 @@ public partial class MainForm : Form
 
     private async void BtnTest_Click(object? sender, EventArgs e)
     {
-        ReadUiIntoOptions();
-        if (!ValidateAndReport(requireArchive: false))
-            return;
-
+        if (!ValidateAndReport(false)) return;
         await RunGuardedAsync("Verbindung testen", async ct =>
         {
             using var client = new DocuWareClient(_opt, Log);
             await client.AuthenticateAsync(ct);
             Log("Anmeldung erfolgreich.");
-
             if (!string.IsNullOrWhiteSpace(_opt.FileCabinetId))
-            {
-                var count = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct);
-                Log($"Archiv enthält {count} Dokument(e).");
-            }
+                Log($"Archiv enthält {await client.GetDocumentCountAsync(_opt.FileCabinetId, ct)} Dokument(e).");
             else
-            {
                 Log("Kein Archiv gewählt – nur Anmeldung getestet.");
-            }
         });
-    }
-
-    private void BtnSave_Click(object? sender, EventArgs e)
-    {
-        try
-        {
-            ReadUiIntoOptions();
-            if (!ValidateAndReport(requireArchive: false))
-                return;
-            _opt.Save();
-            Log($"Konfiguration gespeichert: {ExporterOptions.DefaultPath}");
-        }
-        catch (Exception ex)
-        {
-            Log($"Fehler beim Speichern: {ex.Message}");
-        }
-    }
-
-    private void BtnBrowseOutput_Click(object? sender, EventArgs e)
-    {
-        try
-        {
-            using var dlg = new FolderBrowserDialog { Description = "Ausgabeordner wählen" };
-            if (!string.IsNullOrWhiteSpace(txtOutputRoot.Text) && Directory.Exists(txtOutputRoot.Text))
-                dlg.SelectedPath = txtOutputRoot.Text;
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-                txtOutputRoot.Text = dlg.SelectedPath;
-        }
-        catch (Exception ex)
-        {
-            Log($"Ordnerauswahl fehlgeschlagen: {ex.Message}");
-        }
-    }
-
-    private void BtnOpenLog_Click(object? sender, EventArgs e)
-    {
-        try
-        {
-            ReadUiIntoOptions();
-            var path = _opt.EffectiveLogPath;
-            if (!File.Exists(path))
-            {
-                Log($"Noch keine Logdatei vorhanden: {path}");
-                return;
-            }
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            Log($"Logdatei konnte nicht geöffnet werden: {ex.Message}");
-        }
     }
 
     private void CboArchive_SelectedIndexChanged(object? sender, EventArgs e)
     {
         if (cboArchive.SelectedItem is ArchiveItem ci)
+        {
             _opt.FileCabinetId = ci.Id;
+            // Datumsfeld in die Optionen übernehmen, falls gewählt.
+            if (!string.IsNullOrWhiteSpace(cboDateField.Text))
+                _opt.DateFieldName = cboDateField.Text.Trim();
+            propGrid.Refresh();
+        }
     }
 
-    private void LnkAuthor_LinkClicked(object? sender, LinkLabelLinkClickedEventArgs e)
+    // =====================================================================
+    //  Läufe (Engine)
+    // =====================================================================
+
+    private async void BtnExportNow_Click(object? sender, EventArgs e) => await RunEngineAsync(ExportMode.Export);
+    private async void BtnDryRun_Click(object? sender, EventArgs e) => await RunEngineAsync(ExportMode.DryRun);
+    private async void BtnVerify_Click(object? sender, EventArgs e) => await RunEngineAsync(ExportMode.Verify);
+    private async void BtnRetry_Click(object? sender, EventArgs e) => await RunEngineAsync(ExportMode.RetryErrors);
+    private void BtnCancel_Click(object? sender, EventArgs e) => _cts?.Cancel();
+
+    private async Task RunEngineAsync(ExportMode mode)
+    {
+        if (_running) { Log("Es läuft bereits eine Operation."); return; }
+
+        // Datumsfeld aus dem Dropdown übernehmen.
+        if (!string.IsNullOrWhiteSpace(cboDateField.Text))
+            _opt.DateFieldName = cboDateField.Text.Trim();
+
+        if (mode == ExportMode.Verify)
+        {
+            if (string.IsNullOrWhiteSpace(_opt.StateDbPath) || !File.Exists(_opt.StateDbPath))
+            { Log("Keine Status-DB vorhanden – nichts zu verifizieren."); return; }
+        }
+        else if (!ValidateAndReport(true)) return;
+
+        _running = true;
+        SetRunningUi(true);
+        _cts = new CancellationTokenSource();
+        var progress = new Progress<ExportProgress>(OnProgress);
+
+        try
+        {
+            var engine = new ExportEngine(_opt.Clone(), Log);
+            var result = await Task.Run(() => engine.RunAsync(mode, progress, _cts.Token));
+            Log(result.Summary);
+        }
+        catch (Exception ex) { Log($"Fehler: {ex.Message}"); }
+        finally
+        {
+            _running = false;
+            SetRunningUi(false);
+            _cts?.Dispose();
+            _cts = null;
+            progressBar.Style = ProgressBarStyle.Continuous;
+            progressBar.Value = 0;
+        }
+    }
+
+    private void OnProgress(ExportProgress p)
+    {
+        if (p.Total.HasValue && p.Total.Value > 0)
+        {
+            progressBar.Style = ProgressBarStyle.Continuous;
+            progressBar.Maximum = p.Total.Value;
+            progressBar.Value = Math.Min(p.Done, p.Total.Value);
+        }
+        else
+        {
+            progressBar.Style = ProgressBarStyle.Marquee;
+        }
+        var totalTxt = p.Total.HasValue ? $" / {p.Total}" : "";
+        lblProgress.Text = $"{p.Phase}: {p.Done}{totalTxt} ({p.DocsPerSec:0.0}/s)";
+    }
+
+    private void SetRunningUi(bool running)
+    {
+        btnExportNow.Enabled = !running;
+        btnDryRun.Enabled = !running;
+        btnVerify.Enabled = !running;
+        btnRetry.Enabled = !running;
+        btnZip.Enabled = !running;
+        btnManifest.Enabled = !running;
+        btnCancel.Enabled = running;
+    }
+
+    // =====================================================================
+    //  ZIP / Manifest
+    // =====================================================================
+
+    private async void BtnZip_Click(object? sender, EventArgs e)
+    {
+        if (!Directory.Exists(_opt.OutputRoot)) { Log("Ausgabeordner existiert nicht."); return; }
+        var choice = MessageBox.Show(
+            "Gesamten Export in EINE ZIP-Datei packen?\n(Nein = je Jahr/Monat ein Archiv)",
+            "ZIP packen", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (choice == DialogResult.Cancel) return;
+
+        try
+        {
+            if (choice == DialogResult.Yes)
+            {
+                using var sfd = new SaveFileDialog { Filter = "ZIP-Archiv|*.zip", FileName = "export.zip" };
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+                var path = sfd.FileName;
+                Log("Packe …");
+                Log(await Task.Run(() => Packaging.ZipWholeOutput(_opt.OutputRoot, path)));
+            }
+            else
+            {
+                using var fbd = new FolderBrowserDialog { Description = "Zielordner für Monats-Archive" };
+                if (fbd.ShowDialog(this) != DialogResult.OK) return;
+                var dir = fbd.SelectedPath;
+                Log("Packe je Jahr/Monat …");
+                Log(await Task.Run(() => Packaging.ZipPerYearMonth(_opt.OutputRoot, dir)));
+            }
+        }
+        catch (Exception ex) { Log($"ZIP-Fehler: {ex.Message}"); }
+    }
+
+    private void BtnManifest_Click(object? sender, EventArgs e)
     {
         try
         {
-            Process.Start(new ProcessStartInfo("https://loheide.eu") { UseShellExecute = true });
+            if (string.IsNullOrWhiteSpace(_opt.StateDbPath) || !File.Exists(_opt.StateDbPath))
+            { Log("Keine Status-DB vorhanden."); return; }
+            var path = Path.Combine(_opt.OutputRoot, "manifest.csv");
+            using var store = new ExportStateStore(_opt.StateDbPath);
+            store.ExportManifestCsv(path);
+            Log($"Manifest geschrieben: {path}");
         }
-        catch
-        {
-            // Browser konnte nicht geöffnet werden – ignorieren.
-        }
+        catch (Exception ex) { Log($"Manifest-Fehler: {ex.Message}"); }
     }
 
     // =====================================================================
@@ -312,52 +374,31 @@ public partial class MainForm : Form
     {
         try
         {
-            ReadUiIntoOptions();
-            if (!ValidateAndReport(requireArchive: true))
-                return;
-            _opt.Save();
+            if (!ValidateAndReport(true)) return;
+            _opt.Save(ProfileManager.PathFor(_activeProfile));
             Log("Konfiguration gespeichert.");
-
-            var exePath = Application.ExecutablePath;
-            var (ok, output) = ServiceManager.Install(exePath);
+            var (ok, output) = ServiceManager.Install(Application.ExecutablePath, _opt.ServiceAccount, _opt.ServicePassword);
             Log(output);
             Log(ok ? "Dienst installiert." : "Dienstinstallation fehlgeschlagen.");
         }
-        catch (Exception ex)
-        {
-            Log($"Fehler bei Dienstinstallation: {ex.Message}");
-        }
+        catch (Exception ex) { Log($"Fehler bei Dienstinstallation: {ex.Message}"); }
     }
 
     private void BtnSvcStart_Click(object? sender, EventArgs e)
     {
         try
         {
-            ReadUiIntoOptions();
-            if (!ValidateAndReport(requireArchive: true))
-                return;
-            _opt.Save();
-
-            var (ok, output) = ServiceManager.Start();
-            Log(output);
+            if (!ValidateAndReport(true)) return;
+            _opt.Save(ProfileManager.PathFor(_activeProfile));
+            Log(ServiceManager.Start().output);
         }
-        catch (Exception ex)
-        {
-            Log($"Fehler beim Starten: {ex.Message}");
-        }
+        catch (Exception ex) { Log($"Fehler beim Starten: {ex.Message}"); }
     }
 
     private void BtnSvcStop_Click(object? sender, EventArgs e)
     {
-        try
-        {
-            var (ok, output) = ServiceManager.Stop();
-            Log(output);
-        }
-        catch (Exception ex)
-        {
-            Log($"Fehler beim Stoppen: {ex.Message}");
-        }
+        try { Log(ServiceManager.Stop().output); }
+        catch (Exception ex) { Log($"Fehler beim Stoppen: {ex.Message}"); }
     }
 
     private void BtnSvcUninstall_Click(object? sender, EventArgs e)
@@ -368,10 +409,13 @@ public partial class MainForm : Form
             Log(output);
             Log(ok ? "Dienst deinstalliert." : "Deinstallation fehlgeschlagen.");
         }
-        catch (Exception ex)
-        {
-            Log($"Fehler bei Deinstallation: {ex.Message}");
-        }
+        catch (Exception ex) { Log($"Fehler bei Deinstallation: {ex.Message}"); }
+    }
+
+    private void LnkAuthor_LinkClicked(object? sender, LinkLabelLinkClickedEventArgs e)
+    {
+        try { Process.Start(new ProcessStartInfo("https://loheide.eu") { UseShellExecute = true }); }
+        catch { }
     }
 
     // =====================================================================
@@ -388,7 +432,9 @@ public partial class MainForm : Form
                 status == "Running" ? Theme.Success :
                 status == "Nicht installiert" ? Theme.Subtle : Theme.Text;
 
-            var dbPath = txtStateDb.Text.Trim();
+            if (_running) return; // während eines Laufs zeigt OnProgress den Fortschritt
+
+            var dbPath = _opt.StateDbPath;
             if (!string.IsNullOrWhiteSpace(dbPath) && File.Exists(dbPath))
             {
                 try
@@ -399,10 +445,7 @@ public partial class MainForm : Form
                     lblProgress.Text = $"Fortschritt: {done} erledigt, {err} Fehler";
                     lblProgress.ForeColor = err > 0 ? Theme.Danger : Theme.Text;
                 }
-                catch
-                {
-                    // DB evtl. gerade in Benutzung – ignorieren.
-                }
+                catch { }
             }
             else
             {
@@ -410,10 +453,7 @@ public partial class MainForm : Form
                 lblProgress.ForeColor = Theme.Subtle;
             }
         }
-        catch
-        {
-            // Timer darf niemals abstürzen.
-        }
+        catch { }
     }
 
     // =====================================================================
@@ -429,30 +469,14 @@ public partial class MainForm : Form
             using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
             await action(cts.Token);
         }
-        catch (OperationCanceledException)
-        {
-            Log($"{title}: Zeitüberschreitung/Abbruch.");
-        }
-        catch (Exception ex)
-        {
-            Log($"{title}: Fehler – {ex.Message}");
-        }
-        finally
-        {
-            Enabled = true;
-            UseWaitCursor = false;
-        }
+        catch (OperationCanceledException) { Log($"{title}: Zeitüberschreitung/Abbruch."); }
+        catch (Exception ex) { Log($"{title}: Fehler – {ex.Message}"); }
+        finally { Enabled = true; UseWaitCursor = false; }
     }
 
-    /// <summary>Schreibt eine Meldung mit Zeitstempel in die Log-TextBox und das Datei-Log.</summary>
     private void Log(string message)
     {
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action<string>(Log), message);
-            return;
-        }
-
+        if (InvokeRequired) { BeginInvoke(new Action<string>(Log), message); return; }
         txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
         FileLog.Write("[GUI] " + message);
     }

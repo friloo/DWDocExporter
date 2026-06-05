@@ -5,21 +5,24 @@ using Microsoft.Extensions.Logging;
 namespace DwDocExport;
 
 /// <summary>
-/// Einfaches, threadsicheres Datei-Log. Wird sowohl vom Dienst (zusätzlich zum
-/// Windows-Ereignisprotokoll) als auch von der GUI genutzt, sodass beide in
-/// dieselbe Logdatei schreiben.
+/// Threadsicheres Datei-Log mit Mindest-Loglevel und automatischer Rotation.
+/// Wird von Dienst und GUI gemeinsam genutzt.
 /// </summary>
 public static class FileLog
 {
     private static readonly object Sync = new();
     private static string? _path;
+    private static LogLevel _minLevel = LogLevel.Information;
+    private static long _maxBytes = 10L * 1024 * 1024;
 
-    /// <summary>Setzt den Pfad der Logdatei (Verzeichnis wird bei Bedarf erstellt).</summary>
-    public static void Configure(string? path)
+    /// <summary>Konfiguriert Pfad, Mindestlevel und maximale Dateigröße (MB) vor Rotation.</summary>
+    public static void Configure(string? path, LogLevel minLevel = LogLevel.Information, int maxSizeMb = 10)
     {
         lock (Sync)
         {
             _path = string.IsNullOrWhiteSpace(path) ? null : path;
+            _minLevel = minLevel;
+            _maxBytes = Math.Max(1, maxSizeMb) * 1024L * 1024L;
             if (_path != null)
             {
                 try
@@ -28,18 +31,19 @@ public static class FileLog
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
                 }
-                catch { /* Logging darf nie den Ablauf stören. */ }
+                catch { }
             }
         }
     }
 
-    /// <summary>Aktueller Logdateipfad (oder null, wenn nicht konfiguriert).</summary>
-    public static string? Path
-    {
-        get { lock (Sync) { return _path; } }
-    }
+    public static LogLevel MinLevel { get { lock (Sync) { return _minLevel; } } }
 
-    /// <summary>Schreibt eine Zeile mit Zeitstempel in die Logdatei.</summary>
+    public static string? Path { get { lock (Sync) { return _path; } } }
+
+    /// <summary>Wandelt einen Loglevel-Text (z. B. "Warning") in einen LogLevel.</summary>
+    public static LogLevel ParseLevel(string? text) =>
+        Enum.TryParse<LogLevel>(text, true, out var lvl) ? lvl : LogLevel.Information;
+
     public static void Write(string message)
     {
         string? path;
@@ -50,38 +54,51 @@ public static class FileLog
         var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}";
         lock (Sync)
         {
-            try { File.AppendAllText(path, line); }
-            catch { /* Logging darf nie den Ablauf stören. */ }
+            try
+            {
+                RotateIfNeeded(path);
+                File.AppendAllText(path, line);
+            }
+            catch { }
         }
+    }
+
+    private static void RotateIfNeeded(string path)
+    {
+        try
+        {
+            var fi = new FileInfo(path);
+            if (fi.Exists && fi.Length >= _maxBytes)
+            {
+                var backup = path + ".1";
+                if (File.Exists(backup))
+                    File.Delete(backup);
+                File.Move(path, backup);
+            }
+        }
+        catch { }
     }
 }
 
-/// <summary>ILogger-Provider, der Log-Einträge des Dienstes in die <see cref="FileLog"/> schreibt.</summary>
+/// <summary>ILogger-Provider, der Einträge des Dienstes in die <see cref="FileLog"/> schreibt.</summary>
 public sealed class FileLoggerProvider : ILoggerProvider
 {
-    public ILogger CreateLogger(string categoryName) => new FileLoggerImpl(categoryName);
-
+    public ILogger CreateLogger(string categoryName) => new FileLoggerImpl();
     public void Dispose() { }
 
     private sealed class FileLoggerImpl : ILogger
     {
-        private readonly string _category;
-        public FileLoggerImpl(string category) => _category = category;
-
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= FileLog.MinLevel && logLevel != LogLevel.None;
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
             Exception? exception, Func<TState, Exception?, string> formatter)
         {
             if (!IsEnabled(logLevel))
                 return;
-
             var msg = formatter(state, exception);
             if (exception != null)
                 msg += " | " + exception.Message;
-
             FileLog.Write($"[{logLevel}] {msg}");
         }
     }

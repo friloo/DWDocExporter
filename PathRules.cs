@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
@@ -111,6 +112,109 @@ public static class PathRules
 
         return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt)
                || DateTime.TryParse(raw, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out dt);
+    }
+
+    /// <summary>
+    /// Ersetzt Platzhalter in einer Vorlage. Unterstützt:
+    /// {DocId}, {Original} (Basisname), {OriginalFull}, {Ext},
+    /// {yyyy} {MM} {dd} {HH} {mm} (aus date) sowie {Feld:NAME} (Indexfeld).
+    /// </summary>
+    public static string ResolveTemplate(
+        string template, IReadOnlyDictionary<string, string?> fields,
+        DateTime? date, string docId, string originalName)
+    {
+        if (string.IsNullOrEmpty(template))
+            return template;
+
+        var ext = Path.GetExtension(originalName);
+        var baseName = Path.GetFileNameWithoutExtension(originalName);
+
+        var sb = new StringBuilder(template.Length + 32);
+        for (var i = 0; i < template.Length; i++)
+        {
+            if (template[i] != '{')
+            {
+                sb.Append(template[i]);
+                continue;
+            }
+
+            var end = template.IndexOf('}', i);
+            if (end < 0)
+            {
+                sb.Append(template[i]);
+                continue;
+            }
+
+            var token = template.Substring(i + 1, end - i - 1);
+            i = end;
+
+            if (token.StartsWith("Feld:", StringComparison.OrdinalIgnoreCase))
+            {
+                var fieldName = token.Substring(5);
+                fields.TryGetValue(fieldName, out var val);
+                sb.Append(val ?? "");
+            }
+            else
+            {
+                switch (token)
+                {
+                    case "DocId": sb.Append(docId); break;
+                    case "Original": sb.Append(baseName); break;
+                    case "OriginalFull": sb.Append(originalName); break;
+                    case "Ext": sb.Append(ext); break;
+                    case "yyyy": sb.Append(date?.ToString("yyyy", CultureInfo.InvariantCulture) ?? ""); break;
+                    case "MM": sb.Append(date?.ToString("MM", CultureInfo.InvariantCulture) ?? ""); break;
+                    case "dd": sb.Append(date?.ToString("dd", CultureInfo.InvariantCulture) ?? ""); break;
+                    case "HH": sb.Append(date?.ToString("HH", CultureInfo.InvariantCulture) ?? ""); break;
+                    case "mm": sb.Append(date?.ToString("mm", CultureInfo.InvariantCulture) ?? ""); break;
+                    default: sb.Append('{').Append(token).Append('}'); break; // unbekannt: unverändert
+                }
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Baut das Zielverzeichnis aus einer Pfad-Vorlage (relativ zu outputRoot).
+    /// Jedes Segment wird als Dateiname bereinigt. Leere Segmente entfallen.
+    /// </summary>
+    public static string ResolveTemplatedDirectory(
+        string outputRoot, string pathTemplate,
+        IReadOnlyDictionary<string, string?> fields, DateTime? date, string docId, string originalName)
+    {
+        var resolved = ResolveTemplate(pathTemplate, fields, date, docId, originalName);
+        var dir = outputRoot;
+        foreach (var rawSeg in resolved.Split('\\', '/'))
+        {
+            if (string.IsNullOrWhiteSpace(rawSeg))
+                continue;
+            dir = Path.Combine(dir, SanitizeFileName(rawSeg));
+        }
+        return dir;
+    }
+
+    /// <summary>Baut einen Dateinamen aus einer Vorlage (mit Originalname/Endung).</summary>
+    public static string ResolveTemplatedFileName(
+        string fileNameTemplate,
+        IReadOnlyDictionary<string, string?> fields, DateTime? date, string docId,
+        string originalName, int? sectionSuffix)
+    {
+        var resolved = ResolveTemplate(fileNameTemplate, fields, date, docId, originalName);
+        var ext = Path.GetExtension(originalName);
+
+        // Falls die Vorlage keine Endung enthält, Originalendung anhängen.
+        if (!string.IsNullOrEmpty(ext) && !resolved.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+            resolved += ext;
+
+        var cleanExt = Path.GetExtension(resolved);
+        var baseName = Path.GetFileNameWithoutExtension(SanitizeFileName(resolved));
+        if (string.IsNullOrWhiteSpace(baseName))
+            baseName = $"document_{docId}";
+        if (baseName.Length > MaxBaseNameLength)
+            baseName = baseName.Substring(0, MaxBaseNameLength);
+
+        var sectionPart = sectionSuffix.HasValue ? $"_s{sectionSuffix.Value:00}" : "";
+        return $"{baseName}{sectionPart}{cleanExt}";
     }
 
     /// <summary>Stabiler, deterministischer Hex-Hash (für Hash-Unterordner).</summary>

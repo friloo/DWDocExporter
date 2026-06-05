@@ -18,12 +18,21 @@ public static class ServiceManager
     /// Installiert den Dienst mit Autostart und konfiguriert automatischen
     /// Neustart bei Fehlern. binPath verweist auf die EXE mit Argument --service.
     /// </summary>
-    public static (bool ok, string output) Install(string exePath)
+    public static (bool ok, string output) Install(string exePath, string? account = null, string? password = null)
     {
         // Anführungszeichen um den Pfad; sc.exe erwartet "binPath= " mit Leerzeichen nach '='.
         var binPath = $"\"{exePath}\" --service";
 
-        var create = RunSc($"create {ServiceName} binPath= \"{binPath}\" start= auto DisplayName= \"{DisplayName}\"");
+        var args = $"create {ServiceName} binPath= \"{binPath}\" start= auto DisplayName= \"{DisplayName}\"";
+        // Optionales Dienst-Konto (z. B. DOMAIN\\user oder gMSA „DOMAIN\\svc$").
+        if (!string.IsNullOrWhiteSpace(account))
+        {
+            args += $" obj= \"{account}\"";
+            if (!string.IsNullOrWhiteSpace(password))
+                args += $" password= \"{password}\"";
+        }
+
+        var create = RunSc(args);
         if (!create.ok)
             return create;
 

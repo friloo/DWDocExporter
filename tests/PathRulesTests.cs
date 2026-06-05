@@ -101,6 +101,84 @@ public class PathRulesTests
     }
 }
 
+/// <summary>Tests für Vorlagen (Pfad/Dateiname).</summary>
+public class TemplateTests
+{
+    private static Dictionary<string, string?> Fields() => new()
+    {
+        ["KUNDE"] = "Müller GmbH",
+        ["BELEGNR"] = "4711"
+    };
+
+    [Fact]
+    public void ResolveTemplate_ReplacesFieldAndDate()
+    {
+        var dt = new DateTime(2023, 7, 15);
+        var s = PathRules.ResolveTemplate("{Feld:KUNDE}/{yyyy}/{MM}/{DocId}", Fields(), dt, "99", "x.pdf");
+        Assert.Equal("Müller GmbH/2023/07/99", s);
+    }
+
+    [Fact]
+    public void ResolveTemplatedDirectory_SanitizesSegments()
+    {
+        var dt = new DateTime(2023, 1, 2);
+        var dir = PathRules.ResolveTemplatedDirectory(@"C:\Out", @"{Feld:KUNDE}\{yyyy}", Fields(), dt, "1", "x.pdf");
+        Assert.Contains("2023", dir);
+        Assert.Contains("Out", dir);
+    }
+
+    [Fact]
+    public void ResolveTemplatedFileName_AppendsExtensionWhenMissing()
+    {
+        var name = PathRules.ResolveTemplatedFileName("{DocId}_{Feld:BELEGNR}", Fields(), null, "7", "scan.pdf", null);
+        Assert.Equal("7_4711.pdf", name);
+    }
+
+    [Fact]
+    public void ResolveTemplatedFileName_KeepsExtensionAndSection()
+    {
+        var name = PathRules.ResolveTemplatedFileName("{Original}", Fields(), null, "7", "mail.msg", 1);
+        Assert.Equal("mail_s01.msg", name);
+    }
+}
+
+/// <summary>Tests für die clientseitige Filterlogik.</summary>
+public class DocumentFilterTests
+{
+    private static Dictionary<string, string?> Fields() => new()
+    {
+        ["STATUS"] = "offen",
+        ["DATUM"] = "2023-06-15"
+    };
+
+    [Fact]
+    public void Matches_NoFilters_ReturnsTrue()
+    {
+        Assert.True(DocumentFilter.Matches(Fields(), new ExporterOptions()));
+    }
+
+    [Fact]
+    public void Matches_FieldEquals()
+    {
+        var opt = new ExporterOptions();
+        opt.FieldConditions.Add(new FieldCondition { Field = "STATUS", Operator = FilterOperator.Equals, Value = "offen" });
+        Assert.True(DocumentFilter.Matches(Fields(), opt));
+
+        opt.FieldConditions[0].Value = "erledigt";
+        Assert.False(DocumentFilter.Matches(Fields(), opt));
+    }
+
+    [Fact]
+    public void Matches_DateRange()
+    {
+        var opt = new ExporterOptions { FilterDateField = "DATUM", FilterDateFrom = "2023-06-01", FilterDateTo = "2023-06-30" };
+        Assert.True(DocumentFilter.Matches(Fields(), opt));
+
+        opt.FilterDateFrom = "2023-07-01";
+        Assert.False(DocumentFilter.Matches(Fields(), opt));
+    }
+}
+
 /// <summary>Tests für die DPAPI-Geheimnis-Behandlung (Klartext-Fälle, plattformneutral).</summary>
 public class SecretProtectorTests
 {

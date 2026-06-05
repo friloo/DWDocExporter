@@ -27,22 +27,31 @@ kommt aus dem `Content-Disposition`-Header.
 
 ## ✨ Features
 
+**Kern**
 - 🗂️ **Vollständiger Export** eines Archivs im **Originalformat**, dateityp-neutral
-- ☁️🏢 **Cloud *und* On-Premise** – Token-Login (Identity Service) **und** klassischer Cookie-Login
-- 🔐 **App-Registrierung** (OAuth Client-Credentials) als moderne Alternative zum Passwort-Grant
-- 🔀 **`AuthMode=Auto`** wählt automatisch das richtige Verfahren (Token → Fallback Cookie)
-- 🛡️ **Passwort & Client-Secret verschlüsselt** in der config.json (Windows DPAPI)
-- 🖥️ **Eine EXE, zwei Modi**: komfortable **GUI** zum Einrichten + robuster **Windows-Dienst** zum Exportieren
-- 🚀 **Parallele Downloads** (einstellbar gedrosselt) – schneller bei vielen Dateien
-- 🔁 **Fortsetzbar & ohne Doppel-Downloads** dank SQLite-Statusdatenbank (WAL)
-- ➕ **Inkrementelles Nachscannen** – bricht ab, sobald bereits exportierte Bestände erreicht sind
-- 🧱 **Atomare, gestreamte Schreibvorgänge** (`*.part` → umbenennen) – auch große Dateien speicherschonend
-- 📅 **Ordnerstruktur nach Datum** (`Jahr/Monat`) plus optionale **Hash-Unterordner**, **lange Pfade** (>260) unterstützt
-- 🧾 **Metadaten-Sidecar** (`{Datei}.metadata.json`) mit allen Indexfeldern (optional)
-- ♻️ **Retry mit Backoff** bei `429`/`5xx` (respektiert `Retry-After`), **automatische Neuanmeldung** bei `401`
-- 🧭 **Stabiles Blättern** über HATEOAS-`next`-Links der Plattform
-- ⏱️ **Periodisches Nachscannen** für laufende Archivierung (oder einmaliger Lauf)
-- 📝 **Logging** ins Windows-Ereignisprotokoll **und** in eine Logdatei; Fortschritt & Fehler live in der GUI
+- ☁️🏢 **Cloud *und* On-Premise** – Token-Login (Identity Service), **App-Registrierung** (Client-Credentials) **und** klassischer Cookie-Login, `AuthMode=Auto`
+- 🖥️ **Eine EXE, zwei Modi**: moderne **GUI** (Tabs, PropertyGrid, Dunkelmodus) + robuster **Windows-Dienst**
+- 🛡️ **Passwort & alle Secrets verschlüsselt** in der config.json (Windows DPAPI)
+
+**Gezielt exportieren**
+- 🔎 **Filter**: Datumsbereich und beliebige **Indexfeld-Bedingungen** (=, ≠, enthält, beginnt mit)
+- 🧩 **Pfad- & Dateinamen-Vorlagen** mit Platzhaltern: `{Feld:KUNDE}\{yyyy}\{MM}\{DocId}_{Feld:BELEGNR}`
+- 🗃️ **Mehrere Profile/Jobs** – mehrere Archive mit eigener Konfiguration, der Dienst arbeitet alle ab
+- 🎛️ **Download-Optionen**: Zielformat (Auto/PDF/…), Annotationen, pro Sektion, Datei-Datum aus Indexfeld
+
+**Interaktiv & sicher**
+- ▶️ **Direkt aus der GUI**: Export jetzt · **Trockenlauf** · **Verifizieren** · **Fehler erneut** – mit **Fortschrittsbalken, Durchsatz & Abbrechen**
+- 🔐 **Integrität**: **SHA-256** je Datei, **CSV-Manifest**, Verifikationslauf (Datei + Prüfsumme)
+- 🗜️ **ZIP-Paketierung** (gesamt oder je Jahr/Monat), 🧾 **Metadaten-Sidecar** je Dokument
+- ✉️ **Benachrichtigungen** per **SMTP-Mail** und **Webhook** (Teams/Slack)
+
+**Robust & betriebstauglich**
+- 🚀 **Parallele Downloads** + **Bandbreitenbremse**; 🔁 fortsetzbar, ohne Doppel-Downloads (SQLite/WAL)
+- 🧱 **Atomare, gestreamte Schreibvorgänge**; **lange Pfade** (>260) unterstützt
+- ♻️ **Retry mit Backoff** (respektiert `Retry-After`), Auto-Reauth bei `401`, **HATEOAS-`next`-Paging**
+- ⏱️ **Zeitplan** (aktives Zeitfenster) + **periodisches/inkrementelles Nachscannen**
+- 🌐 **Proxy/TLS**-Optionen (eigenes CA-Zertifikat, Bypass für Testsysteme), **Dienst-Konto** (gMSA) bei Installation
+- 📝 **Logging** ins EventLog **und** in eine rotierende Logdatei (einstellbares Level)
 
 ---
 
@@ -128,8 +137,16 @@ des Laufs: neu anmelden und Request wiederholen.
 
 ## ⚙️ Einstellungen (`config.json`)
 
-Liegt neben der EXE; **GUI und Dienst lesen dieselbe Datei.** Alle Werte sind in
-der GUI editierbar und mit Platzhaltern vorbelegt.
+Liegt neben der EXE; **GUI und Dienst lesen dieselbe Datei.** In der GUI werden
+**alle** Optionen über ein **PropertyGrid** nach Kategorie gepflegt
+(`01 Verbindung`, `02 Netzwerk/TLS`, `03 Ziel & Ablage`, `04 Ordner & Dateinamen`,
+`05 Download`, `06 Leistung`, `07 Integrität`, `08 Filter`,
+`09 Nachscannen/Zeitplan`, `10 Benachrichtigung`, `11 Dienst-Konto`,
+`12 Logging`, `13 Oberfläche`). Geheimnisse werden maskiert angezeigt und
+verschlüsselt gespeichert. **Mehrere Profile** (Jobs) liegen als JSON-Dateien im
+Unterordner `profiles/`; das Standardprofil ist die `config.json`.
+
+Die wichtigsten Schlüssel (Auszug):
 
 | Schlüssel | Bedeutung | Vorbelegung |
 |-----------|-----------|-------------|
@@ -194,16 +211,21 @@ der GUI editierbar und mit Platzhaltern vorbelegt.
 
 ## 🖱️ GUI-Bedienung
 
-| Schaltfläche | Funktion |
-|--------------|----------|
-| **Anmelden / Archive laden** | Meldet gemäß `AuthMode` an und füllt das Dropdown mit allen **Archiven** (Baskets ausgeschlossen) – keine ID nötig |
-| **Indexfelder laden** | Feldnamen des gewählten Archivs ins **Datumsfeld**-Dropdown (leer = keine Datumsordner) |
-| **Verbindung testen** | Anmeldung + Anzahl Dokumente des Archivs |
-| **Speichern** | Schreibt `config.json` |
-| **Dienst installieren / starten / stoppen / deinstallieren** | Steuert den Windows-Dienst (vor *Installieren*/*Starten* wird automatisch gespeichert) |
+Die GUI ist in vier Tabs gegliedert:
 
-Ein Timer zeigt **Dienststatus** (Stopped/Running/…), den **Fortschritt** (Anzahl
-`done`) und die letzten Fehler aus der SQLite-DB.
+- **Einstellungen** – alle Optionen im PropertyGrid (kategorisiert), Speichern/Neu laden.
+- **Verbindung & Archiv** – *Anmelden / Archive laden* (füllt das Archiv-Dropdown,
+  Baskets ausgeschlossen), *Verbindung testen*, *Indexfelder laden* (für das Datumsfeld).
+- **Ausführen & Dienst** –
+  - **Profil**: Job auswählen, *Neu* / *Löschen* / *Als Profil speichern*.
+  - **Ausführen**: *Export jetzt*, *Trockenlauf*, *Verifizieren*, *Fehler erneut*,
+    *Abbrechen* – mit **Fortschrittsbalken**; dazu *Als ZIP packen* und *Manifest schreiben*.
+  - **Windows-Dienst**: *Installieren / Starten / Stoppen / Deinstallieren*
+    (vor *Installieren*/*Starten* wird automatisch gespeichert; optional unter Dienst-Konto).
+- **Protokoll** – Live-Meldungen (auch in die Logdatei geschrieben).
+
+Empfohlener Ablauf: **Einstellungen pflegen → Anmelden → Archiv wählen →
+(optional) testen/Trockenlauf → Export jetzt** oder **Dienst installieren/starten**.
 
 ---
 
@@ -243,17 +265,22 @@ Anmelden (Token/Cookie)
 | Datei | Inhalt |
 |-------|--------|
 | `Program.cs` | Einstieg: `--service` → Generic Host (Windows-Dienst), sonst GUI |
-| `MainForm.cs` / `.Designer.cs` | WinForms-Oberfläche und Logik |
-| `ExporterOptions.cs` | Laden/Speichern der `config.json` (mit Verschlüsselung) |
+| `MainForm.cs` / `.Designer.cs` | WinForms-Oberfläche (Tabs, PropertyGrid, Läufe, Dienst) |
+| `Theme.cs` / `Prompt.cs` | Hell/Dunkel-Design; kleiner Eingabedialog |
+| `ExporterOptions.cs` | Konfiguration (kategorisiert, verschlüsselt), `Clone` |
+| `ProfileManager.cs` | Mehrere Profile/Jobs (`profiles/*.json`) |
 | `SecretProtector.cs` | DPAPI-Ver-/Entschlüsselung geheimer Werte |
-| `DocuWareClient.cs` | REST-Client: Token-/Cookie-/Client-Credentials-Auth, Archive, Felder, Seiten, Streaming-Download, Sektionen |
-| `PathRules.cs` | Reine Pfad-/Namenslogik (Datums-/Hash-Ordner, lange Pfade) |
-| `ExportStateStore.cs` | SQLite-Statusspeicher (WAL) inkl. Lauf-Metadaten |
-| `FileLog.cs` | Datei-Log + ILogger-Provider |
-| `Worker.cs` | Hintergrunddienst mit Export-Logik (parallel, inkrementell) |
-| `ServiceManager.cs` | Dienst install/start/stop/delete (`sc.exe` + `ServiceController`) |
+| `DocuWareClient.cs` | REST-Client: Token/Cookie/Client-Credentials, Proxy/TLS, Streaming-Download, Sektionen, Paging |
+| `DocumentFilter.cs` | Clientseitige Filter (Datum, Feldbedingungen) |
+| `PathRules.cs` | Pfad-/Namens-/Vorlagenlogik, lange Pfade |
+| `ExportEngine.cs` | Kern-Engine: Export/Trockenlauf/Verifizieren/Fehler-Retry, Hash, Drossel, Zeitstempel |
+| `ExportStateStore.cs` | SQLite-Statusspeicher (WAL), SHA-256, Manifest |
+| `Notifier.cs` / `Packaging.cs` | SMTP-/Webhook-Benachrichtigung; ZIP-Paketierung |
+| `FileLog.cs` | Rotierendes Datei-Log + ILogger-Provider |
+| `Worker.cs` | Windows-Dienst: Zeitfenster, alle Profile, Engine |
+| `ServiceManager.cs` | Dienst install/start/stop/delete (`sc.exe` + Dienst-Konto) |
 | `app.manifest` | `requireAdministrator`, `longPathAware` |
-| `tests/` | xUnit-Tests für `PathRules` und `SecretProtector` |
+| `tests/` | xUnit-Tests (PathRules, Templates, Filter, SecretProtector) |
 | `.github/workflows/build.yml` | CI: Windows-Build, Tests, Single-File-Publish, Release |
 
 ---
@@ -269,15 +296,23 @@ Anmelden (Token/Cookie)
 - [x] Inkrementelles Nachscannen
 - [x] Parallele Downloads mit Drossel
 - [x] Metadaten-Sidecar (`{Datei}.metadata.json`) je Dokument
-- [x] Datei-Log zusätzlich zum EventLog
+- [x] Datei-Log (rotierend) zusätzlich zum EventLog, einstellbares Level
 - [x] Lange Pfade (>260 Zeichen)
+- [x] **Filter** (Datumsbereich, Feldbedingungen)
+- [x] **Pfad-/Dateinamen-Vorlagen** mit Indexfeld-Platzhaltern
+- [x] **GUI-Export** mit Fortschritt, Trockenlauf, Verifizieren, Fehler-Retry, Abbrechen
+- [x] **SHA-256**, CSV-Manifest, Verifikationslauf
+- [x] **Mehrere Profile/Jobs**
+- [x] **Benachrichtigungen** (SMTP + Webhook)
+- [x] **Proxy/TLS-Optionen** + Dienst-Konto bei Installation
+- [x] **ZIP-Paketierung**, Datei-Datum aus Indexfeld, **Zeitfenster**, Dunkelmodus
 - [x] Unit-Tests + GitHub-Actions-Windows-Build mit Release-Artefakt
 
 **Mögliche nächste Schritte:**
 
-- [ ] Server-seitiger inkrementeller Export per Suchabfrage (nur geänderte seit Zeitpunkt)
+- [ ] Server-seitiger Filter via DocuWare-DialogExpression (statt clientseitig)
 - [ ] Code-Signing der EXE und MSI-/Inno-Setup-Installer
-- [ ] Mehrere Archive in einem Lauf
+- [ ] Lokalisierung EN vollständig in der Oberfläche
 
 ---
 

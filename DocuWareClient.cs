@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -82,6 +83,17 @@ public sealed class DocuWareClient : IDisposable
             AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
         };
 
+        // Proxy (optional)
+        if (!string.IsNullOrWhiteSpace(_opt.ProxyUrl))
+        {
+            _handler.Proxy = new WebProxy(_opt.ProxyUrl);
+            _handler.UseProxy = true;
+        }
+
+        // TLS: Zertifikatsfehler ignorieren bzw. eigenes CA-Zertifikat vertrauen.
+        if (_opt.IgnoreCertErrors || !string.IsNullOrWhiteSpace(_opt.CustomCaPath))
+            _handler.ServerCertificateCustomValidationCallback = ValidateServerCertificate;
+
         _http = new HttpClient(_handler)
         {
             Timeout = TimeSpan.FromMinutes(30)
@@ -104,6 +116,44 @@ public sealed class DocuWareClient : IDisposable
     }
 
     private void Log(string msg) => _log?.Invoke(msg);
+
+    /// <summary>
+    /// Validierungs-Callback für Server-Zertifikate: akzeptiert bei
+    /// IgnoreCertErrors alles; bei gesetztem CustomCaPath, wenn das vorgelegte
+    /// Zertifikat (oder seine Kette) mit dem eigenen CA-Zertifikat übereinstimmt.
+    /// </summary>
+    private bool ValidateServerCertificate(HttpRequestMessage req, X509Certificate2? cert,
+        X509Chain? chain, System.Net.Security.SslPolicyErrors errors)
+    {
+        if (_opt.IgnoreCertErrors)
+            return true;
+        if (errors == System.Net.Security.SslPolicyErrors.None)
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(_opt.CustomCaPath) && cert != null)
+        {
+            try
+            {
+                using var ca = new X509Certificate2(_opt.CustomCaPath);
+                if (string.Equals(cert.Thumbprint, ca.Thumbprint, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (chain != null)
+                    foreach (var el in chain.ChainElements)
+                        if (string.Equals(el.Certificate.Thumbprint, ca.Thumbprint, StringComparison.OrdinalIgnoreCase))
+                            return true;
+            }
+            catch { /* ungültiges CA -> ablehnen */ }
+        }
+        return false;
+    }
+
+    /// <summary>Baut den Download-Query-String aus den Optionen (Zielformat, Annotationen).</summary>
+    private string DownloadQuery()
+    {
+        var fileType = string.IsNullOrWhiteSpace(_opt.TargetFileType) ? "Auto" : _opt.TargetFileType;
+        var keep = _opt.KeepAnnotations ? "true" : "false";
+        return $"?targetFileType={Uri.EscapeDataString(fileType)}&keepAnnotations={keep}";
+    }
 
     // =====================================================================
     //  Authentifizierung
@@ -572,11 +622,35 @@ public sealed class DocuWareClient : IDisposable
         return new DocumentPage(result, next);
     }
 
+    /// <summary>Lädt die Indexfelder eines einzelnen Dokuments (für erneuten Versuch).</summary>
+    public async Task<DwDocument> GetDocumentAsync(string fileCabinetId, string docId, CancellationToken ct)
+    {
+        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}";
+        using var resp = await SendWithRetryAsync(
+            () => JsonGet(url), HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var fields = new Dictionary<string, string?>();
+        if (root.TryGetProperty("Fields", out var fieldArr) && fieldArr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var f in fieldArr.EnumerateArray())
+            {
+                var name = TryGetString(f, "FieldName");
+                if (!string.IsNullOrEmpty(name))
+                    fields[name] = ExtractFieldValue(f);
+            }
+        }
+        return new DwDocument(docId, fields);
+    }
+
     /// <summary>Öffnet den Originalformat-Download eines Dokuments (gestreamt).</summary>
     public Task<DownloadStream> OpenDocumentDownloadAsync(string fileCabinetId, string docId, CancellationToken ct)
     {
-        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}/FileDownload" +
-                  "?targetFileType=Auto&keepAnnotations=false";
+        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}/FileDownload" + DownloadQuery();
         return OpenDownloadAsync(url, $"document_{docId}", ct);
     }
 
@@ -608,7 +682,7 @@ public sealed class DocuWareClient : IDisposable
     /// <summary>Öffnet den Originalformat-Download einer Sektion (gestreamt).</summary>
     public Task<DownloadStream> OpenSectionDownloadAsync(string sectionId, CancellationToken ct)
     {
-        var url = $"{PlatformBaseUrl}/Sections/{sectionId}/Data?targetFileType=Auto&keepAnnotations=false";
+        var url = $"{PlatformBaseUrl}/Sections/{sectionId}/Data" + DownloadQuery();
         return OpenDownloadAsync(url, $"section_{sectionId}", ct);
     }
 
