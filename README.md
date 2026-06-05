@@ -29,43 +29,32 @@ kommt aus dem `Content-Disposition`-Header.
 
 - 🗂️ **Vollständiger Export** eines Aktenschranks im **Originalformat**, dateityp-neutral
 - ☁️🏢 **Cloud *und* On-Premise** – Token-Login (Identity Service) **und** klassischer Cookie-Login
+- 🔐 **App-Registrierung** (OAuth Client-Credentials) als moderne Alternative zum Passwort-Grant
 - 🔀 **`AuthMode=Auto`** wählt automatisch das richtige Verfahren (Token → Fallback Cookie)
+- 🛡️ **Passwort & Client-Secret verschlüsselt** in der config.json (Windows DPAPI)
 - 🖥️ **Eine EXE, zwei Modi**: komfortable **GUI** zum Einrichten + robuster **Windows-Dienst** zum Exportieren
+- 🚀 **Parallele Downloads** (einstellbar gedrosselt) – schneller bei vielen Dateien
 - 🔁 **Fortsetzbar & ohne Doppel-Downloads** dank SQLite-Statusdatenbank (WAL)
-- 🧱 **Atomare Schreibvorgänge** (`*.part` → umbenennen) – keine halben Dateien bei Abbruch
-- 📅 **Ordnerstruktur nach Datum** (`Jahr/Monat`) plus optionale **Hash-Unterordner**
-- ♻️ **Retry mit Backoff** bei `429`/`5xx`, **automatische Neuanmeldung** bei `401`
+- ➕ **Inkrementelles Nachscannen** – bricht ab, sobald bereits exportierte Bestände erreicht sind
+- 🧱 **Atomare, gestreamte Schreibvorgänge** (`*.part` → umbenennen) – auch große Dateien speicherschonend
+- 📅 **Ordnerstruktur nach Datum** (`Jahr/Monat`) plus optionale **Hash-Unterordner**, **lange Pfade** (>260) unterstützt
+- 🧾 **Metadaten-Sidecar** (`{Datei}.metadata.json`) mit allen Indexfeldern (optional)
+- ♻️ **Retry mit Backoff** bei `429`/`5xx` (respektiert `Retry-After`), **automatische Neuanmeldung** bei `401`
+- 🧭 **Stabiles Blättern** über HATEOAS-`next`-Links der Plattform
 - ⏱️ **Periodisches Nachscannen** für laufende Archivierung (oder einmaliger Lauf)
-- 🧾 **Logging** ins Windows-Ereignisprotokoll; Fortschritt & Fehler live in der GUI
+- 📝 **Logging** ins Windows-Ereignisprotokoll **und** in eine Logdatei; Fortschritt & Fehler live in der GUI
 
 ---
 
 ## 📸 Oberfläche
 
-> _Screenshot-Platzhalter – hier später ein Bild der GUI einfügen, z. B.
-> `docs/screenshot.png`._
+<div align="center">
 
-```
-┌────────────────────────────────────────────────────────────┐
-│ DwDocExport – DocuWare Dokument-Export                       │
-├────────────────────────────────────────────────────────────┤
-│ Server:            https://ihr-server.docuware.cloud         │
-│ Organisation:      MEINE-ORG                                 │
-│ Benutzer:          api-user        Passwort: ••••••••        │
-│ Authentifizierung: [ Auto ▾ ]                                │
-│ [ Anmelden / Schränke laden ]   [ Verbindung testen ]        │
-│ Aktenschrank:      [ Mailarchiv ▾ ]                          │
-│ Datumsfeld:        [ DOCUMENT_DATE ▾ ]  [ Indexfelder laden ]│
-│ Ausgabeordner:     C:\Export\DocuWare                        │
-│ … weitere Einstellungen …                  [ Speichern ]     │
-├──  Dienststeuerung  ─────────────────────────────────────────┤
-│ [Installieren] [Starten] [Stoppen] [Deinstallieren]          │
-│ Dienststatus: Running     Fortschritt: 1.284 erledigt, 0 Fhl │
-├──  Meldungen  ───────────────────────────────────────────────┤
-│ [10:21:03] Anmeldung über Identity Service (Token) ok.       │
-│ [10:21:04] 3 Aktenschrank/Schränke geladen.                  │
-└────────────────────────────────────────────────────────────┘
-```
+![DwDocExport GUI](docs/gui-mockup.png)
+
+<sub>Layout-Vorschau der GUI (Anmeldung, Schrank-Auswahl, alle Einstellungen, Dienststeuerung, Log).</sub>
+
+</div>
 
 ---
 
@@ -112,6 +101,14 @@ Einstellung **`AuthMode`**: `Auto` (Standard) · `Cookie` · `Token`.
 > mehreren Organisationen wird `acr_values=organization:<Name>` gesetzt – bitte
 > gegen die konkrete Instanz prüfen.
 
+### App-Registrierung (OAuth Client-Credentials) — empfohlen für Automatisierung
+Ist ein **`OAuthClientSecret`** (und optional eine eigene **`OAuthClientId`**)
+gesetzt, verwendet DwDocExport statt des Passwort-Grants den
+**Client-Credentials-Grant** einer DocuWare **App-Registrierung**
+(`grant_type=client_credentials`, `scope=docuware.platform`). Das ist der moderne,
+für Server-zu-Server-Automatisierung empfohlene Weg und kommt ohne hinterlegtes
+Benutzerpasswort aus.
+
 ### Cookie-Login (klassisch) — v. a. **On-Premise**
 `POST {Server}/DocuWare/Platform/Account/Logon` mit `UserName`, `Password`,
 `Organization`, `RememberMe=false`. Cookies werden über einen `CookieContainer`
@@ -138,17 +135,23 @@ der GUI editierbar und mit Platzhaltern vorbelegt.
 |-----------|-----------|-------------|
 | `Server` | Basis-URL der DocuWare-Instanz | `https://IHR-SERVER.docuware.cloud` |
 | `Organization` | Organisationsname | `IHRE-ORG` |
-| `User` / `Password` | API-Anmeldedaten | `api-user` / `GEHEIM` |
+| `User` / `Password` | API-Anmeldedaten (Passwort wird verschlüsselt gespeichert) | `api-user` / `GEHEIM` |
 | `AuthMode` | `Auto` / `Cookie` / `Token` | `Auto` |
+| `OAuthClientId` | Eigene Client-ID (leer = `docuware.platform.net.client`) | `""` |
+| `OAuthClientSecret` | Client-Secret einer App-Registrierung → Client-Credentials-Grant (verschlüsselt) | `""` |
 | `FileCabinetId` | Ziel-Aktenschrank (per Dropdown gewählt) | `""` |
 | `OutputRoot` | Zielordner für Exporte | `C:\Export\DocuWare` |
 | `StateDbPath` | SQLite-Statusdatenbank | `C:\Export\DocuWare\export-state.db` |
+| `LogFilePath` | Logdatei (leer = `OutputRoot\dwdocexport.log`) | `""` |
 | `DateFieldName` | Indexfeld für `Jahr/Monat`-Ordner (leer = aus) | `""` |
 | `FolderHashDepth` | Hash-Unterordner: `0` aus · `1`=16 · `2`=256 | `0` |
 | `PageSize` | Dokumente pro API-Seite | `500` |
 | `DelayMs` | Pause zwischen Downloads (ms) | `100` |
 | `MaxRetries` | Wiederholungen bei `429`/`5xx` | `4` |
+| `MaxParallelDownloads` | Gleichzeitige Downloads (`1` = sequenziell) | `4` |
 | `DownloadPerSection` | pro Sektion statt Gesamtdatei | `false` |
+| `WriteMetadataSidecar` | `{Datei}.metadata.json` mit Indexfeldern schreiben | `false` |
+| `Incremental` | beim Nachscannen frühzeitig abbrechen | `false` |
 | `RescanIntervalMinutes` | `0`=einmal · `>0`=periodisch | `0` |
 
 <details>
@@ -159,20 +162,32 @@ der GUI editierbar und mit Platzhaltern vorbelegt.
   "Server": "https://ihr-server.docuware.cloud",
   "Organization": "MEINE-ORG",
   "User": "api-user",
-  "Password": "GEHEIM",
+  "Password": "DPAPI:....(verschlüsselt)....",
   "AuthMode": "Auto",
+  "OAuthClientId": "",
+  "OAuthClientSecret": "",
   "FileCabinetId": "a1b2c3d4-....",
   "OutputRoot": "C:\\Export\\DocuWare",
   "StateDbPath": "C:\\Export\\DocuWare\\export-state.db",
+  "LogFilePath": "",
   "DateFieldName": "DOCUMENT_DATE",
   "FolderHashDepth": 0,
   "PageSize": 500,
   "DelayMs": 100,
   "MaxRetries": 4,
+  "MaxParallelDownloads": 4,
   "DownloadPerSection": false,
+  "WriteMetadataSidecar": false,
+  "Incremental": false,
   "RescanIntervalMinutes": 0
 }
 ```
+
+> 🔒 Passwort und Client-Secret werden beim Speichern per **Windows DPAPI**
+> (Scope *LocalMachine*) verschlüsselt und mit dem Präfix `DPAPI:` abgelegt.
+> Klartextwerte werden weiterhin akzeptiert (z. B. zum Vorbelegen), beim nächsten
+> Speichern aber verschlüsselt.
+
 </details>
 
 ---
@@ -229,26 +244,40 @@ Anmelden (Token/Cookie)
 |-------|--------|
 | `Program.cs` | Einstieg: `--service` → Generic Host (Windows-Dienst), sonst GUI |
 | `MainForm.cs` / `.Designer.cs` | WinForms-Oberfläche und Logik |
-| `ExporterOptions.cs` | Laden/Speichern der `config.json` |
-| `DocuWareClient.cs` | REST-Client: Token-/Cookie-Auth, Schränke, Felder, Seiten, Download, Sektionen |
-| `ExportStateStore.cs` | SQLite-Statusspeicher (WAL) |
-| `Worker.cs` | Hintergrunddienst mit Export-Logik |
+| `ExporterOptions.cs` | Laden/Speichern der `config.json` (mit Verschlüsselung) |
+| `SecretProtector.cs` | DPAPI-Ver-/Entschlüsselung geheimer Werte |
+| `DocuWareClient.cs` | REST-Client: Token-/Cookie-/Client-Credentials-Auth, Schränke, Felder, Seiten, Streaming-Download, Sektionen |
+| `PathRules.cs` | Reine Pfad-/Namenslogik (Datums-/Hash-Ordner, lange Pfade) |
+| `ExportStateStore.cs` | SQLite-Statusspeicher (WAL) inkl. Lauf-Metadaten |
+| `FileLog.cs` | Datei-Log + ILogger-Provider |
+| `Worker.cs` | Hintergrunddienst mit Export-Logik (parallel, inkrementell) |
 | `ServiceManager.cs` | Dienst install/start/stop/delete (`sc.exe` + `ServiceController`) |
-| `app.manifest` | `requireAdministrator` |
+| `app.manifest` | `requireAdministrator`, `longPathAware` |
+| `tests/` | xUnit-Tests für `PathRules` und `SecretProtector` |
+| `.github/workflows/build.yml` | CI: Windows-Build, Tests, Single-File-Publish, Release |
 
 ---
 
-## 🗺️ Roadmap / mögliche Erweiterungen
+## 🗺️ Roadmap
 
-- [ ] Passwort verschlüsselt speichern (Windows DPAPI)
-- [ ] OAuth über App-Registrierung (Client Credentials) als Alternative zum Passwort-Grant
-- [ ] Downloads streamen (große Dateien nicht komplett in den RAM)
-- [ ] `Retry-After`-Header bei `429` respektieren
-- [ ] Inkrementeller Export (nur neue/geänderte Dokumente)
-- [ ] Parallele Downloads mit Drossel
-- [ ] Metadaten-Sidecar (`{DocId}.json`/CSV) je Dokument
-- [ ] Datei-Log zusätzlich zum EventLog
-- [ ] Unit-Tests + GitHub-Actions-Windows-Build + signierte Release-Artefakte/Installer
+**Bereits umgesetzt:**
+
+- [x] Passwort & Client-Secret verschlüsselt speichern (Windows DPAPI)
+- [x] OAuth über App-Registrierung (Client-Credentials) als Alternative zum Passwort-Grant
+- [x] Downloads streamen (große Dateien nicht komplett in den RAM)
+- [x] `Retry-After`-Header bei `429` respektieren
+- [x] Inkrementelles Nachscannen
+- [x] Parallele Downloads mit Drossel
+- [x] Metadaten-Sidecar (`{Datei}.metadata.json`) je Dokument
+- [x] Datei-Log zusätzlich zum EventLog
+- [x] Lange Pfade (>260 Zeichen)
+- [x] Unit-Tests + GitHub-Actions-Windows-Build mit Release-Artefakt
+
+**Mögliche nächste Schritte:**
+
+- [ ] Server-seitiger inkrementeller Export per Suchabfrage (nur geänderte seit Zeitpunkt)
+- [ ] Code-Signing der EXE und MSI-/Inno-Setup-Installer
+- [ ] Mehrere Schränke in einem Lauf
 
 ---
 
@@ -270,11 +299,14 @@ Nein – nach dem Anmelden wählst du den Schrank einfach im Dropdown.
 
 ## 📜 Lizenz
 
-Vorgeschlagen: **MIT** – lege dazu eine `LICENSE`-Datei im Repo an. _(Noch nicht
-final festgelegt.)_
+Veröffentlicht unter der **MIT-Lizenz** – siehe [`LICENSE`](LICENSE).
 
 ---
 
 <div align="center">
-<sub>Erstellt für den Export von DocuWare-Archiven · Platform REST API · .NET 8</sub>
+
+**Erstellt von [Loheide.eu](https://loheide.eu)**
+
+<sub>DocuWare-Archiv-Export · Platform REST API · .NET 8</sub>
+
 </div>

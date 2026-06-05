@@ -44,6 +44,39 @@ public sealed class ExportStateStore : IDisposable
                     Error      TEXT,
                     UpdatedUtc TEXT NOT NULL
                 );");
+        // Schlüssel/Wert-Tabelle für Metadaten wie den letzten Laufzeitpunkt.
+        Exec(@"CREATE TABLE IF NOT EXISTS Meta(
+                    Key   TEXT PRIMARY KEY,
+                    Value TEXT
+                );");
+    }
+
+    /// <summary>Liest den Zeitpunkt des letzten erfolgreichen Durchlaufs (oder null).</summary>
+    public DateTime? GetLastRunUtc()
+    {
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT Value FROM Meta WHERE Key='LastRunUtc' LIMIT 1;";
+            var v = cmd.ExecuteScalar() as string;
+            if (v != null && DateTime.TryParse(v, null,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                return dt;
+            return null;
+        }
+    }
+
+    /// <summary>Speichert den Zeitpunkt des letzten erfolgreichen Durchlaufs.</summary>
+    public void SetLastRunUtc(DateTime utc)
+    {
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = @"INSERT INTO Meta(Key, Value) VALUES('LastRunUtc', $v)
+                                ON CONFLICT(Key) DO UPDATE SET Value=$v;";
+            cmd.Parameters.AddWithValue("$v", utc.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
     }
 
     /// <summary>Prüft, ob ein Dokument bereits erfolgreich exportiert wurde.</summary>

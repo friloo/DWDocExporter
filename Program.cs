@@ -46,6 +46,8 @@ internal static class Program
 
         // Logging in das Windows-Ereignisprotokoll unter der Quelle "DwDocExport".
         builder.Logging.AddEventLog(settings => settings.SourceName = "DwDocExport");
+        // Zusätzlich in die Logdatei schreiben (Pfad wird im Worker konfiguriert).
+        builder.Logging.AddProvider(new FileLoggerProvider());
 
         // Der eigentliche Hintergrunddienst.
         builder.Services.AddHostedService<Worker>();

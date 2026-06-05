@@ -1,10 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,7 +12,8 @@ namespace DwDocExport;
 
 /// <summary>
 /// Der Hintergrunddienst (Windows Worker Service). Exportiert alle Dokumente
-/// eines DocuWare-Schranks im Originalformat – dateityp-neutral, fortsetzbar.
+/// eines DocuWare-Schranks im Originalformat – dateityp-neutral, fortsetzbar,
+/// optional parallel und inkrementell.
 /// </summary>
 public sealed class Worker : BackgroundService
 {
@@ -28,23 +26,31 @@ public sealed class Worker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Konfiguration neben der EXE laden.
         var configPath = ExporterOptions.DefaultPath;
         var opt = ExporterOptions.Load(configPath);
 
+        // Datei-Log konfigurieren (zusätzlich zum Ereignisprotokoll).
+        FileLog.Configure(opt.EffectiveLogPath);
+
         _logger.LogInformation("DwDocExport-Dienst gestartet. Konfiguration: {Path}", configPath);
+        FileLog.Write($"Dienst gestartet. Konfiguration: {configPath}");
 
         if (string.IsNullOrWhiteSpace(opt.FileCabinetId))
         {
             _logger.LogError("Kein FileCabinetId konfiguriert – Dienst beendet die Arbeit.");
+            FileLog.Write("FEHLER: Kein FileCabinetId konfiguriert.");
             return;
         }
 
         try
         {
+            var firstPass = true;
             do
             {
-                await RunExportPassAsync(opt, stoppingToken).ConfigureAwait(false);
+                // Im inkrementellen Modus nur ab dem zweiten Durchlauf früh abbrechen.
+                await RunExportPassAsync(opt, incremental: opt.Incremental && !firstPass, stoppingToken)
+                    .ConfigureAwait(false);
+                firstPass = false;
 
                 if (opt.RescanIntervalMinutes <= 0)
                 {
@@ -61,83 +67,139 @@ public sealed class Worker : BackgroundService
         catch (OperationCanceledException)
         {
             _logger.LogInformation("Dienst wird gestoppt (Abbruch angefordert).");
+            FileLog.Write("Dienst gestoppt (Abbruch angefordert).");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unerwarteter Fehler im Exportdienst.");
+            FileLog.Write($"FEHLER (Dienst): {ex.Message}");
         }
     }
 
     /// <summary>Führt einen vollständigen Export-Durchlauf über alle Dokumente aus.</summary>
-    private async Task RunExportPassAsync(ExporterOptions opt, CancellationToken ct)
+    private async Task RunExportPassAsync(ExporterOptions opt, bool incremental, CancellationToken ct)
     {
         using var store = new ExportStateStore(opt.StateDbPath);
-        using var client = new DocuWareClient(opt, msg => _logger.LogInformation("{Msg}", msg));
+        using var client = new DocuWareClient(opt, msg =>
+        {
+            _logger.LogInformation("{Msg}", msg);
+            FileLog.Write(msg);
+        });
 
         await client.AuthenticateAsync(ct).ConfigureAwait(false);
         _logger.LogInformation("Authentifizierung erfolgreich. Beginne Export aus Schrank {Fc}.", opt.FileCabinetId);
 
         Directory.CreateDirectory(opt.OutputRoot);
 
-        var start = 0;
         var pageSize = Math.Max(1, opt.PageSize);
+        var maxParallel = Math.Max(1, opt.MaxParallelDownloads);
         var total = 0;
 
-        while (!ct.IsCancellationRequested)
+        var nextUrl = client.BuildFirstPageUrl(opt.FileCabinetId, pageSize);
+
+        while (!ct.IsCancellationRequested && nextUrl != null)
         {
-            var page = await client.GetPageAsync(opt.FileCabinetId, start, pageSize, ct).ConfigureAwait(false);
-            if (page.Count == 0)
+            var page = await client.GetDocumentsAsync(nextUrl, ct).ConfigureAwait(false);
+            if (page.Items.Count == 0)
                 break;
 
-            foreach (var doc in page)
+            // Bereits erledigte Dokumente herausfiltern.
+            var todo = page.Items.Where(d => !store.IsDone(d.DocId)).ToList();
+
+            // Inkrementell: Wenn auf dieser Seite nichts mehr zu tun ist, sind wir
+            // bei bereits exportierten Beständen angekommen -> Durchlauf beenden.
+            if (incremental && todo.Count == 0)
             {
-                ct.ThrowIfCancellationRequested();
-
-                if (store.IsDone(doc.DocId))
-                    continue;
-
-                var fieldsJson = JsonSerializer.Serialize(doc.Fields);
-                try
-                {
-                    var savedPath = await ExportDocumentAsync(client, opt, doc, ct).ConfigureAwait(false);
-                    store.MarkDone(doc.DocId, savedPath, fieldsJson);
-                    total++;
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Fehler beim Export von Dokument {Id}.", doc.DocId);
-                    store.MarkError(doc.DocId, ex.Message, fieldsJson);
-                }
-
-                if (opt.DelayMs > 0)
-                    await Task.Delay(opt.DelayMs, ct).ConfigureAwait(false);
+                _logger.LogInformation("Inkrementell: Seite vollständig vorhanden – Durchlauf beendet.");
+                break;
             }
 
-            // Letzte Seite erreicht, wenn weniger als PageSize zurückkamen.
-            if (page.Count < pageSize)
-                break;
+            total += await ProcessDocumentsAsync(client, opt, store, todo, maxParallel, ct).ConfigureAwait(false);
 
-            start += pageSize;
+            // Folge-Link der Plattform nutzen (stabiles Blättern).
+            nextUrl = page.NextUrl;
         }
 
-        _logger.LogInformation(
-            "Durchlauf beendet. Neu exportiert: {New}. Gesamt erledigt: {Done}, Fehler: {Err}.",
-            total, store.CountDone(), store.CountError());
+        store.SetLastRunUtc(DateTime.UtcNow);
+
+        var summary = $"Durchlauf beendet. Neu exportiert: {total}. " +
+                      $"Gesamt erledigt: {store.CountDone()}, Fehler: {store.CountError()}.";
+        _logger.LogInformation("{Summary}", summary);
+        FileLog.Write(summary);
+    }
+
+    /// <summary>
+    /// Exportiert die übergebenen Dokumente, gedrosselt auf maxParallel gleichzeitige
+    /// Downloads. Liefert die Anzahl erfolgreich exportierter Dokumente.
+    /// </summary>
+    private async Task<int> ProcessDocumentsAsync(
+        DocuWareClient client, ExporterOptions opt, ExportStateStore store,
+        List<DwDocument> docs, int maxParallel, CancellationToken ct)
+    {
+        using var gate = new SemaphoreSlim(maxParallel);
+        var succeeded = 0;
+        var tasks = new List<Task>();
+
+        foreach (var doc in docs)
+        {
+            ct.ThrowIfCancellationRequested();
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+
+            tasks.Add(Task.Run(async () =>
+            {
+                try
+                {
+                    var fieldsJson = JsonSerializer.Serialize(doc.Fields);
+                    try
+                    {
+                        var savedPath = await ExportDocumentAsync(client, opt, doc, ct).ConfigureAwait(false);
+
+                        if (opt.WriteMetadataSidecar)
+                            WriteSidecar(savedPath, doc, fieldsJson);
+
+                        store.MarkDone(doc.DocId, savedPath, fieldsJson);
+                        Interlocked.Increment(ref succeeded);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Fehler beim Export von Dokument {Id}.", doc.DocId);
+                        FileLog.Write($"FEHLER Doc {doc.DocId}: {ex.Message}");
+                        store.MarkError(doc.DocId, ex.Message, fieldsJson);
+                    }
+
+                    if (opt.DelayMs > 0)
+                        await Task.Delay(opt.DelayMs, ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }, ct));
+        }
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+        return succeeded;
     }
 
     /// <summary>
     /// Exportiert ein einzelnes Dokument (ganze Datei oder pro Sektion) und
-    /// gibt den gespeicherten Pfad zurück.
+    /// gibt den gespeicherten Pfad zurück. Der Download wird gestreamt.
     /// </summary>
     private async Task<string> ExportDocumentAsync(
         DocuWareClient client, ExporterOptions opt, DwDocument doc, CancellationToken ct)
     {
-        var targetDir = BuildTargetDirectory(opt, doc);
-        Directory.CreateDirectory(targetDir);
+        var dateConfigured = !string.IsNullOrWhiteSpace(opt.DateFieldName);
+        string? dateRaw = null;
+        if (dateConfigured)
+            doc.Fields.TryGetValue(opt.DateFieldName, out dateRaw);
+
+        var targetDir = PathRules.ResolveTargetDirectory(
+            opt.OutputRoot, dateConfigured, dateRaw, opt.FolderHashDepth, doc.DocId);
+        Directory.CreateDirectory(PathRules.ToExtendedLengthPath(targetDir));
 
         if (opt.DownloadPerSection)
         {
@@ -146,149 +208,67 @@ public sealed class Worker : BackgroundService
             var index = 0;
             foreach (var sid in sectionIds)
             {
-                var dl = await client.DownloadSectionAsync(sid, ct).ConfigureAwait(false);
-                var fileName = BuildFileName(doc.DocId, dl.FileName, sectionSuffix: index);
-                lastPath = WriteAtomic(targetDir, fileName, dl.Data);
+                using var dl = await client.OpenSectionDownloadAsync(sid, ct).ConfigureAwait(false);
+                var fileName = PathRules.BuildFileName(doc.DocId, dl.FileName, sectionSuffix: index);
+                lastPath = await WriteStreamAtomicAsync(targetDir, fileName, dl.Content, ct).ConfigureAwait(false);
                 index++;
             }
 
             if (lastPath == null)
             {
-                // Keine Sektionen gefunden -> ganze Datei laden.
-                var dl = await client.DownloadDocumentAsync(opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
-                var fileName = BuildFileName(doc.DocId, dl.FileName, null);
-                lastPath = WriteAtomic(targetDir, fileName, dl.Data);
+                // Keine Sektionen -> ganze Datei.
+                using var dl = await client.OpenDocumentDownloadAsync(opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
+                var fileName = PathRules.BuildFileName(doc.DocId, dl.FileName, null);
+                lastPath = await WriteStreamAtomicAsync(targetDir, fileName, dl.Content, ct).ConfigureAwait(false);
             }
             return lastPath;
         }
         else
         {
-            var dl = await client.DownloadDocumentAsync(opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
-            var fileName = BuildFileName(doc.DocId, dl.FileName, null);
-            return WriteAtomic(targetDir, fileName, dl.Data);
+            using var dl = await client.OpenDocumentDownloadAsync(opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
+            var fileName = PathRules.BuildFileName(doc.DocId, dl.FileName, null);
+            return await WriteStreamAtomicAsync(targetDir, fileName, dl.Content, ct).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// Ermittelt das Zielverzeichnis: bei gesetztem und parsebarem Datumsfeld
-    /// OutputRoot\JJJJ\MM, sonst flach (bzw. _unsortiert). Optional Hash-Unterordner.
+    /// Streamt den Inhalt zuerst in eine *.part-Datei und benennt sie dann atomar
+    /// um – so entstehen keine halben Dateien bei Abbruch. Unterstützt lange Pfade.
     /// </summary>
-    private static string BuildTargetDirectory(ExporterOptions opt, DwDocument doc)
-    {
-        var dir = opt.OutputRoot;
-
-        if (!string.IsNullOrWhiteSpace(opt.DateFieldName))
-        {
-            if (doc.Fields.TryGetValue(opt.DateFieldName, out var raw) &&
-                TryParseDate(raw, out var dt))
-            {
-                dir = Path.Combine(opt.OutputRoot,
-                    dt.ToString("yyyy", CultureInfo.InvariantCulture),
-                    dt.ToString("MM", CultureInfo.InvariantCulture));
-            }
-            else
-            {
-                // Datumsfeld vorgesehen, aber nicht parsebar -> Sammelordner.
-                dir = Path.Combine(opt.OutputRoot, "_unsortiert");
-            }
-        }
-
-        if (opt.FolderHashDepth > 0)
-        {
-            var hash = StableHashHex(doc.DocId);
-            // Tiefe 1 -> 1 Hex-Zeichen (16 Ordner), Tiefe 2 -> 2 Hex-Zeichen (256 Ordner).
-            var depth = Math.Min(opt.FolderHashDepth, hash.Length);
-            for (var i = 0; i < depth; i++)
-                dir = Path.Combine(dir, hash[i].ToString());
-        }
-
-        return dir;
-    }
-
-    /// <summary>Versucht, einen DocuWare-Datumswert in verschiedenen Formaten zu parsen.</summary>
-    private static bool TryParseDate(string? raw, out DateTime dt)
-    {
-        dt = default;
-        if (string.IsNullOrWhiteSpace(raw))
-            return false;
-
-        // DocuWare liefert Datumswerte häufig als ISO-8601 oder /Date(…)/.
-        if (raw.StartsWith("/Date(", StringComparison.Ordinal))
-        {
-            var inner = raw.Substring(6).TrimEnd(')', '/');
-            var sign = inner.IndexOfAny(new[] { '+', '-' }, 1);
-            if (sign > 0)
-                inner = inner.Substring(0, sign);
-            if (long.TryParse(inner, out var ms))
-            {
-                dt = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
-                return true;
-            }
-        }
-
-        return DateTime.TryParse(raw, CultureInfo.InvariantCulture,
-                   DateTimeStyles.AssumeLocal, out dt)
-               || DateTime.TryParse(raw, CultureInfo.CurrentCulture,
-                   DateTimeStyles.AssumeLocal, out dt);
-    }
-
-    /// <summary>
-    /// Baut den Zieldateinamen "{DocId}_{Originalname}" mit bereinigten Zeichen
-    /// und begrenzter Länge. Bei Sektionen wird ein Suffix eingefügt.
-    /// </summary>
-    private static string BuildFileName(string docId, string originalName, int? sectionSuffix)
-    {
-        var cleanOriginal = SanitizeFileName(originalName);
-        var ext = Path.GetExtension(cleanOriginal);
-        var baseName = Path.GetFileNameWithoutExtension(cleanOriginal);
-
-        if (string.IsNullOrWhiteSpace(baseName))
-            baseName = "document";
-
-        var sectionPart = sectionSuffix.HasValue ? $"_s{sectionSuffix.Value:00}" : "";
-        var prefix = $"{SanitizeFileName(docId)}_";
-
-        // Gesamtlänge des Dateinamens begrenzen (Windows-Pfadgrenzen beachten).
-        const int maxBaseLen = 120;
-        if (baseName.Length > maxBaseLen)
-            baseName = baseName.Substring(0, maxBaseLen);
-
-        return $"{prefix}{baseName}{sectionPart}{ext}";
-    }
-
-    /// <summary>Ersetzt für Dateinamen ungültige Zeichen durch Unterstriche.</summary>
-    private static string SanitizeFileName(string name)
-    {
-        if (string.IsNullOrEmpty(name))
-            return "_";
-        var invalid = Path.GetInvalidFileNameChars();
-        var sb = new StringBuilder(name.Length);
-        foreach (var c in name)
-            sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
-        return sb.ToString().Trim();
-    }
-
-    /// <summary>
-    /// Schreibt zuerst eine *.part-Datei und benennt sie dann atomar um – so
-    /// entstehen keine halben Dateien bei Abbruch. Bestehende Datei wird ersetzt.
-    /// </summary>
-    private static string WriteAtomic(string targetDir, string fileName, byte[] data)
+    private static async Task<string> WriteStreamAtomicAsync(
+        string targetDir, string fileName, Stream source, CancellationToken ct)
     {
         var finalPath = Path.Combine(targetDir, fileName);
         var partPath = finalPath + ".part";
 
-        File.WriteAllBytes(partPath, data);
-        if (File.Exists(finalPath))
-            File.Delete(finalPath);
-        File.Move(partPath, finalPath);
+        var finalEx = PathRules.ToExtendedLengthPath(finalPath);
+        var partEx = PathRules.ToExtendedLengthPath(partPath);
+
+        await using (var fs = new FileStream(partEx, FileMode.Create, FileAccess.Write,
+                         FileShare.None, 81920, useAsync: true))
+        {
+            await source.CopyToAsync(fs, 81920, ct).ConfigureAwait(false);
+        }
+
+        if (File.Exists(finalEx))
+            File.Delete(finalEx);
+        File.Move(partEx, finalEx);
 
         return finalPath;
     }
 
-    /// <summary>Stabiler Hex-Hash (für Hash-Unterordner) – plattformunabhängig deterministisch.</summary>
-    private static string StableHashHex(string input)
+    /// <summary>Schreibt eine Metadaten-Sidecar-Datei (.metadata.json) neben das Dokument.</summary>
+    private static void WriteSidecar(string savedPath, DwDocument doc, string fieldsJson)
     {
-        var bytes = MD5.HashData(Encoding.UTF8.GetBytes(input));
-        return Convert.ToHexString(bytes).ToLowerInvariant();
+        var sidecarPath = savedPath + ".metadata.json";
+        var payload = new
+        {
+            DocId = doc.DocId,
+            ExportedUtc = DateTime.UtcNow.ToString("o"),
+            FileName = Path.GetFileName(savedPath),
+            Fields = doc.Fields
+        };
+        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(PathRules.ToExtendedLengthPath(sidecarPath), json);
     }
 }

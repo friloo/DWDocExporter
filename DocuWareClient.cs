@@ -10,19 +10,38 @@ using System.Threading.Tasks;
 namespace DwDocExport;
 
 /// <summary>
-/// Ergebnis eines Datei-Downloads: Rohbytes plus aus Content-Disposition
-/// ermittelter Original-Dateiname.
+/// Offener Datei-Download im Originalformat: stellt den Antwort-Stream und den
+/// aus Content-Disposition ermittelten Dateinamen bereit. Muss mit using/Dispose
+/// freigegeben werden, da die HTTP-Antwort gehalten wird (Streaming).
 /// </summary>
-public sealed record DownloadResult(byte[] Data, string FileName);
+public sealed class DownloadStream : IDisposable
+{
+    private readonly HttpResponseMessage _resp;
+    public string FileName { get; }
+    public Stream Content { get; }
+
+    internal DownloadStream(HttpResponseMessage resp, string fileName, Stream content)
+    {
+        _resp = resp;
+        FileName = fileName;
+        Content = content;
+    }
+
+    public void Dispose() => _resp.Dispose();
+}
+
+/// <summary>Eine Seite Dokumente plus optionalem Folge-Link (HATEOAS "next").</summary>
+public sealed record DocumentPage(List<DwDocument> Items, string? NextUrl);
 
 /// <summary>Kurzinfo zu einem Dateischrank (Aktenschrank) – ohne Baskets.</summary>
 public sealed record FileCabinetInfo(string Id, string Name);
 
 /// <summary>
 /// Kapselt sämtliche Kommunikation mit der DocuWare Platform REST API.
-/// Unterstützt sowohl Cookie-Login (klassisch / On-Prem) als auch
-/// Token-Login über den DocuWare Identity Service (Cloud / modernes On-Prem).
-/// Dateityp-neutral: Downloads erfolgen im Originalformat.
+/// Unterstützt Cookie-Login (klassisch / On-Prem) sowie Token-Login über den
+/// DocuWare Identity Service (Resource Owner Password ODER – bei gesetztem
+/// Client-Secret – Client-Credentials einer App-Registrierung).
+/// Downloads erfolgen dateityp-neutral im Originalformat und werden gestreamt.
 /// </summary>
 public sealed class DocuWareClient : IDisposable
 {
@@ -32,6 +51,7 @@ public sealed class DocuWareClient : IDisposable
     private readonly CookieContainer _cookies = new();
     private readonly HttpClientHandler _handler;
     private readonly HttpClient _http;
+    private readonly string _serverRoot;
 
     // Aktiver Authentifizierungszustand
     private AuthMode _effectiveMode = AuthMode.Cookie;
@@ -40,10 +60,11 @@ public sealed class DocuWareClient : IDisposable
     private string? _tokenEndpoint;
     private DateTimeOffset _tokenExpiresUtc = DateTimeOffset.MinValue;
 
-    // Konstante Parameter für den DocuWare Identity Service (Resource Owner Password Grant).
+    // Standardparameter für den DocuWare Identity Service (Resource Owner Password Grant).
     // Verifiziert gegen DocuWare-Doku (KBA-37505 / developer.docuware.com OAuth Support).
-    private const string DwClientId = "docuware.platform.net.client";
-    private const string DwScope = "docuware.platform offline_access";
+    private const string DefaultClientId = "docuware.platform.net.client";
+    private const string PasswordScope = "docuware.platform offline_access";
+    private const string ClientCredentialsScope = "docuware.platform";
 
     /// <summary>Basis-URL der Plattform, z. B. https://server/DocuWare/Platform</summary>
     public string PlatformBaseUrl { get; }
@@ -63,12 +84,23 @@ public sealed class DocuWareClient : IDisposable
 
         _http = new HttpClient(_handler)
         {
-            Timeout = TimeSpan.FromMinutes(10)
+            Timeout = TimeSpan.FromMinutes(30)
         };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("DwDocExport/1.0");
 
         var server = (_opt.Server ?? string.Empty).TrimEnd('/');
         PlatformBaseUrl = $"{server}/DocuWare/Platform";
+
+        // Wurzel (Schema + Host) zum Auflösen relativer HATEOAS-Links.
+        try
+        {
+            var u = new Uri(server);
+            _serverRoot = $"{u.Scheme}://{u.Authority}";
+        }
+        catch
+        {
+            _serverRoot = server;
+        }
     }
 
     private void Log(string msg) => _log?.Invoke(msg);
@@ -77,10 +109,6 @@ public sealed class DocuWareClient : IDisposable
     //  Authentifizierung
     // =====================================================================
 
-    /// <summary>
-    /// Authentifiziert gemäß <see cref="ExporterOptions.AuthMode"/>.
-    /// Auto: zuerst Token, bei Fehlschlag Cookie.
-    /// </summary>
     public async Task AuthenticateAsync(CancellationToken ct)
     {
         switch (_opt.AuthMode)
@@ -113,13 +141,9 @@ public sealed class DocuWareClient : IDisposable
         }
     }
 
-    /// <summary>
-    /// Klassischer Cookie-Login (v. a. On-Prem):
-    /// POST {Platform}/Account/Logon mit Formularfeldern; Cookies bleiben im Handler.
-    /// </summary>
+    /// <summary>Klassischer Cookie-Login (POST Account/Logon); Cookies bleiben im Handler.</summary>
     private async Task AuthenticateCookieAsync(CancellationToken ct)
     {
-        // Vor erneutem Login alte Cookies verwerfen.
         ClearCookies();
         _accessToken = null;
         _http.DefaultRequestHeaders.Authorization = null;
@@ -148,12 +172,7 @@ public sealed class DocuWareClient : IDisposable
         }
     }
 
-    /// <summary>
-    /// Token-Login über den DocuWare Identity Service:
-    /// 1) IdentityServiceInfo -> Identity-Service-URL
-    /// 2) openid-configuration -> token_endpoint
-    /// 3) Resource Owner Password Grant -> access_token (+ refresh_token)
-    /// </summary>
+    /// <summary>Token-Login über den Identity Service (Discovery + Grant).</summary>
     private async Task AuthenticateTokenAsync(CancellationToken ct)
     {
         ClearCookies();
@@ -161,14 +180,13 @@ public sealed class DocuWareClient : IDisposable
         var identityServiceUrl = await GetIdentityServiceUrlAsync(ct).ConfigureAwait(false);
         _tokenEndpoint = await GetTokenEndpointAsync(identityServiceUrl, ct).ConfigureAwait(false);
 
-        await RequestTokenWithPasswordAsync(ct).ConfigureAwait(false);
+        await RequestTokenAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Ermittelt die URL des zuständigen Identity Service. DocuWare stellt diese
     /// je nach Version unter {Platform}/Home/IdentityServiceInfo (gängig) oder
-    /// {Platform}/Account/IdentityServiceInfo bereit. Beide Pfade werden probiert;
-    /// schlägt alles fehl =&gt; kein Token-Login möglich (Fallback auf Cookie).
+    /// {Platform}/Account/IdentityServiceInfo bereit. Beide Pfade werden probiert.
     /// </summary>
     private async Task<string> GetIdentityServiceUrlAsync(CancellationToken ct)
     {
@@ -197,7 +215,6 @@ public sealed class DocuWareClient : IDisposable
                 var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 using var doc = JsonDocument.Parse(json);
 
-                // Feldname je nach Version "IdentityServiceUrl" oder "identityServiceUrl".
                 var url = TryGetString(doc.RootElement, "IdentityServiceUrl")
                           ?? TryGetString(doc.RootElement, "identityServiceUrl");
 
@@ -215,9 +232,7 @@ public sealed class DocuWareClient : IDisposable
         throw last ?? new InvalidOperationException("Identity Service konnte nicht ermittelt werden.");
     }
 
-    /// <summary>
-    /// Liest den OpenID-Connect-Discovery-Endpunkt und liefert den token_endpoint.
-    /// </summary>
+    /// <summary>Liest die OpenID-Discovery und liefert den token_endpoint.</summary>
     private async Task<string> GetTokenEndpointAsync(string identityServiceUrl, CancellationToken ct)
     {
         var discoveryUrl = $"{identityServiceUrl}/.well-known/openid-configuration";
@@ -238,27 +253,44 @@ public sealed class DocuWareClient : IDisposable
     }
 
     /// <summary>
-    /// Fordert per Resource Owner Password Grant ein Access-Token an.
-    /// Die Organisation wird – sofern angegeben – über acr_values übergeben.
+    /// Fordert ein Access-Token an: Bei gesetztem Client-Secret per
+    /// Client-Credentials (App-Registrierung), sonst per Resource Owner Password.
     /// </summary>
-    private async Task RequestTokenWithPasswordAsync(CancellationToken ct)
+    private async Task RequestTokenAsync(CancellationToken ct)
     {
         if (string.IsNullOrEmpty(_tokenEndpoint))
             throw new InvalidOperationException("token_endpoint ist nicht gesetzt.");
 
-        var form = new Dictionary<string, string>
-        {
-            ["grant_type"] = "password",
-            ["scope"] = DwScope,
-            ["client_id"] = DwClientId,
-            ["username"] = _opt.User,
-            ["password"] = _opt.Password
-        };
+        Dictionary<string, string> form;
 
-        // Organisation: DocuWare erwartet sie bei mehreren Organisationen.
-        // Übergabe als acr_values (organization:<Name>) gemäß IdentityServer-Konvention.
-        if (!string.IsNullOrWhiteSpace(_opt.Organization))
-            form["acr_values"] = $"organization:{_opt.Organization}";
+        if (!string.IsNullOrWhiteSpace(_opt.OAuthClientSecret))
+        {
+            // App-Registrierung: Client-Credentials-Grant.
+            form = new Dictionary<string, string>
+            {
+                ["grant_type"] = "client_credentials",
+                ["scope"] = ClientCredentialsScope,
+                ["client_id"] = string.IsNullOrWhiteSpace(_opt.OAuthClientId) ? DefaultClientId : _opt.OAuthClientId,
+                ["client_secret"] = _opt.OAuthClientSecret
+            };
+            if (!string.IsNullOrWhiteSpace(_opt.Organization))
+                form["acr_values"] = $"organization:{_opt.Organization}";
+        }
+        else
+        {
+            // Klassisch: Resource Owner Password Grant.
+            form = new Dictionary<string, string>
+            {
+                ["grant_type"] = "password",
+                ["scope"] = PasswordScope,
+                ["client_id"] = string.IsNullOrWhiteSpace(_opt.OAuthClientId) ? DefaultClientId : _opt.OAuthClientId,
+                ["username"] = _opt.User,
+                ["password"] = _opt.Password
+            };
+            // Organisation bei mehreren Organisationen via acr_values (instanzabhängig).
+            if (!string.IsNullOrWhiteSpace(_opt.Organization))
+                form["acr_values"] = $"organization:{_opt.Organization}";
+        }
 
         using var content = new FormUrlEncodedContent(form);
         using var req = new HttpRequestMessage(HttpMethod.Post, _tokenEndpoint) { Content = content };
@@ -273,20 +305,19 @@ public sealed class DocuWareClient : IDisposable
         ApplyTokenResponse(body);
     }
 
-    /// <summary>Erneuert das Access-Token über das refresh_token.</summary>
+    /// <summary>Erneuert das Access-Token über das refresh_token (sonst Neuanforderung).</summary>
     private async Task RefreshTokenAsync(CancellationToken ct)
     {
         if (string.IsNullOrEmpty(_tokenEndpoint) || string.IsNullOrEmpty(_refreshToken))
         {
-            // Kein Refresh möglich -> komplette Neuanmeldung.
-            await RequestTokenWithPasswordAsync(ct).ConfigureAwait(false);
+            await RequestTokenAsync(ct).ConfigureAwait(false);
             return;
         }
 
         var form = new Dictionary<string, string>
         {
             ["grant_type"] = "refresh_token",
-            ["client_id"] = DwClientId,
+            ["client_id"] = string.IsNullOrWhiteSpace(_opt.OAuthClientId) ? DefaultClientId : _opt.OAuthClientId,
             ["refresh_token"] = _refreshToken
         };
 
@@ -297,8 +328,7 @@ public sealed class DocuWareClient : IDisposable
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
-            // Refresh fehlgeschlagen -> erneut mit Passwort anmelden.
-            await RequestTokenWithPasswordAsync(ct).ConfigureAwait(false);
+            await RequestTokenAsync(ct).ConfigureAwait(false);
             return;
         }
 
@@ -306,7 +336,6 @@ public sealed class DocuWareClient : IDisposable
         ApplyTokenResponse(body);
     }
 
-    /// <summary>Übernimmt access_token / refresh_token / expires_in aus der Token-Antwort.</summary>
     private void ApplyTokenResponse(string body)
     {
         using var doc = JsonDocument.Parse(body);
@@ -320,14 +349,10 @@ public sealed class DocuWareClient : IDisposable
         if (root.TryGetProperty("expires_in", out var exp) && exp.TryGetInt32(out var v))
             expiresIn = v;
 
-        // Etwas Puffer vor Ablauf einplanen.
         _tokenExpiresUtc = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, expiresIn - 60));
-
-        _http.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", _accessToken);
+        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
     }
 
-    /// <summary>Stellt sicher, dass im Token-Modus ein gültiges Token vorliegt.</summary>
     private async Task EnsureTokenFreshAsync(CancellationToken ct)
     {
         if (_effectiveMode != AuthMode.Token)
@@ -338,7 +363,6 @@ public sealed class DocuWareClient : IDisposable
         await RefreshTokenAsync(ct).ConfigureAwait(false);
     }
 
-    /// <summary>Erneute Anmeldung (nach 401) im aktuell aktiven Modus.</summary>
     private async Task ReAuthenticateAsync(CancellationToken ct)
     {
         if (_effectiveMode == AuthMode.Token)
@@ -353,11 +377,13 @@ public sealed class DocuWareClient : IDisposable
 
     /// <summary>
     /// Sendet eine Anfrage mit Wiederholungslogik:
-    /// 401 -&gt; neu authentifizieren und einmal erneut; 429/5xx -&gt; Backoff (MaxRetries).
-    /// Der Aufrufer liefert für jeden Versuch eine frische Request-Instanz.
+    /// 401 -&gt; neu authentifizieren und einmal erneut; 429/5xx -&gt; Backoff
+    /// (Retry-After-Header wird respektiert, sonst exponentiell), bis MaxRetries.
     /// </summary>
     private async Task<HttpResponseMessage> SendWithRetryAsync(
-        Func<HttpRequestMessage> requestFactory, CancellationToken ct)
+        Func<HttpRequestMessage> requestFactory,
+        HttpCompletionOption completion,
+        CancellationToken ct)
     {
         var maxRetries = Math.Max(0, _opt.MaxRetries);
         var reauthDone = false;
@@ -370,11 +396,9 @@ public sealed class DocuWareClient : IDisposable
             HttpResponseMessage resp;
             using (var req = requestFactory())
             {
-                resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
-                    .ConfigureAwait(false);
+                resp = await _http.SendAsync(req, completion, ct).ConfigureAwait(false);
             }
 
-            // 401: einmalig neu anmelden und Request wiederholen.
             if (resp.StatusCode == HttpStatusCode.Unauthorized && !reauthDone)
             {
                 resp.Dispose();
@@ -384,12 +408,11 @@ public sealed class DocuWareClient : IDisposable
                 continue;
             }
 
-            // 429 / 5xx: mit exponentiellem Backoff wiederholen.
             var transient = resp.StatusCode == (HttpStatusCode)429 || (int)resp.StatusCode >= 500;
             if (transient && attempt < maxRetries)
             {
+                var delay = GetRetryAfter(resp) ?? TimeSpan.FromSeconds(Math.Pow(2, attempt));
                 resp.Dispose();
-                var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));
                 Log($"Vorübergehender Fehler – erneuter Versuch in {delay.TotalSeconds:0}s.");
                 await Task.Delay(delay, ct).ConfigureAwait(false);
                 continue;
@@ -397,6 +420,22 @@ public sealed class DocuWareClient : IDisposable
 
             return resp;
         }
+    }
+
+    /// <summary>Liest den Retry-After-Header (Sekunden oder HTTP-Datum), falls vorhanden.</summary>
+    private static TimeSpan? GetRetryAfter(HttpResponseMessage resp)
+    {
+        var ra = resp.Headers.RetryAfter;
+        if (ra == null)
+            return null;
+        if (ra.Delta.HasValue)
+            return ra.Delta.Value;
+        if (ra.Date.HasValue)
+        {
+            var diff = ra.Date.Value - DateTimeOffset.UtcNow;
+            return diff > TimeSpan.Zero ? diff : TimeSpan.Zero;
+        }
+        return null;
     }
 
     // =====================================================================
@@ -407,7 +446,8 @@ public sealed class DocuWareClient : IDisposable
     public async Task<List<FileCabinetInfo>> GetFileCabinetsAsync(CancellationToken ct)
     {
         using var resp = await SendWithRetryAsync(
-            () => JsonGet($"{PlatformBaseUrl}/FileCabinets"), ct).ConfigureAwait(false);
+            () => JsonGet($"{PlatformBaseUrl}/FileCabinets"),
+            HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
 
         var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -419,7 +459,6 @@ public sealed class DocuWareClient : IDisposable
         {
             foreach (var fc in arr.EnumerateArray())
             {
-                // Baskets ausschließen (IsBasket == true).
                 if (fc.TryGetProperty("IsBasket", out var isBasket) &&
                     isBasket.ValueKind == JsonValueKind.True)
                     continue;
@@ -437,7 +476,8 @@ public sealed class DocuWareClient : IDisposable
     public async Task<List<string>> GetFieldNamesAsync(string fileCabinetId, CancellationToken ct)
     {
         using var resp = await SendWithRetryAsync(
-            () => JsonGet($"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}"), ct).ConfigureAwait(false);
+            () => JsonGet($"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}"),
+            HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
 
         var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -457,11 +497,12 @@ public sealed class DocuWareClient : IDisposable
         return names;
     }
 
-    /// <summary>Liefert die Gesamtzahl der Dokumente im Schrank (Count=0 + calculateTotalCount).</summary>
+    /// <summary>Liefert die Gesamtzahl der Dokumente im Schrank.</summary>
     public async Task<int> GetDocumentCountAsync(string fileCabinetId, CancellationToken ct)
     {
         var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents?start=0&count=1&calculateTotalCount=true";
-        using var resp = await SendWithRetryAsync(() => JsonGet(url), ct).ConfigureAwait(false);
+        using var resp = await SendWithRetryAsync(
+            () => JsonGet(url), HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
 
         var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -478,24 +519,27 @@ public sealed class DocuWareClient : IDisposable
         return 0;
     }
 
-    /// <summary>
-    /// Liefert eine Seite von Dokumenten. Jedes Element enthält DocId und die
-    /// Indexfelder als Schlüssel/Wert-Liste.
-    /// </summary>
-    public async Task<List<DwDocument>> GetPageAsync(string fileCabinetId, int start, int count, CancellationToken ct)
-    {
-        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents" +
-                  $"?start={start}&count={count}&calculateTotalCount=true";
+    /// <summary>Baut die URL der ersten Dokumentseite.</summary>
+    public string BuildFirstPageUrl(string fileCabinetId, int count) =>
+        $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents" +
+        $"?start=0&count={count}&calculateTotalCount=true";
 
-        using var resp = await SendWithRetryAsync(() => JsonGet(url), ct).ConfigureAwait(false);
+    /// <summary>
+    /// Liefert eine Seite Dokumente samt Folge-Link. Per HATEOAS-"next"-Link kann
+    /// stabil weitergeblättert werden (robuster als start/count bei Änderungen).
+    /// </summary>
+    public async Task<DocumentPage> GetDocumentsAsync(string url, CancellationToken ct)
+    {
+        using var resp = await SendWithRetryAsync(
+            () => JsonGet(url), HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
 
         var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
 
         var result = new List<DwDocument>();
-        if (doc.RootElement.TryGetProperty("Items", out var items) &&
-            items.ValueKind == JsonValueKind.Array)
+        if (root.TryGetProperty("Items", out var items) && items.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in items.EnumerateArray())
             {
@@ -523,39 +567,25 @@ public sealed class DocuWareClient : IDisposable
                 result.Add(new DwDocument(id, fields));
             }
         }
-        return result;
+
+        var next = ExtractNextLink(root);
+        return new DocumentPage(result, next);
     }
 
-    /// <summary>
-    /// Lädt ein Dokument im Originalformat herunter (targetFileType=Auto).
-    /// Der Dateiname wird aus dem Content-Disposition-Header ermittelt.
-    /// </summary>
-    public async Task<DownloadResult> DownloadDocumentAsync(string fileCabinetId, string docId, CancellationToken ct)
+    /// <summary>Öffnet den Originalformat-Download eines Dokuments (gestreamt).</summary>
+    public Task<DownloadStream> OpenDocumentDownloadAsync(string fileCabinetId, string docId, CancellationToken ct)
     {
         var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}/FileDownload" +
                   "?targetFileType=Auto&keepAnnotations=false";
-
-        using var resp = await SendWithRetryAsync(() =>
-        {
-            var r = new HttpRequestMessage(HttpMethod.Get, url);
-            // Beliebiger Inhaltstyp – wir wollen die Originaldatei.
-            r.Headers.Accept.ParseAdd("application/octet-stream");
-            r.Headers.Accept.ParseAdd("*/*");
-            return r;
-        }, ct).ConfigureAwait(false);
-
-        resp.EnsureSuccessStatusCode();
-
-        var data = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        var fileName = GetFileNameFromContentDisposition(resp) ?? $"document_{docId}";
-        return new DownloadResult(data, fileName);
+        return OpenDownloadAsync(url, $"document_{docId}", ct);
     }
 
     /// <summary>Liefert die Sektions-IDs eines Dokuments (für DownloadPerSection).</summary>
     public async Task<List<string>> GetSectionIdsAsync(string fileCabinetId, string docId, CancellationToken ct)
     {
         var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}/Sections";
-        using var resp = await SendWithRetryAsync(() => JsonGet(url), ct).ConfigureAwait(false);
+        using var resp = await SendWithRetryAsync(
+            () => JsonGet(url), HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
 
         var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -575,23 +605,36 @@ public sealed class DocuWareClient : IDisposable
         return ids;
     }
 
-    /// <summary>Lädt die Daten einer einzelnen Sektion im Originalformat herunter.</summary>
-    public async Task<DownloadResult> DownloadSectionAsync(string sectionId, CancellationToken ct)
+    /// <summary>Öffnet den Originalformat-Download einer Sektion (gestreamt).</summary>
+    public Task<DownloadStream> OpenSectionDownloadAsync(string sectionId, CancellationToken ct)
     {
         var url = $"{PlatformBaseUrl}/Sections/{sectionId}/Data?targetFileType=Auto&keepAnnotations=false";
-        using var resp = await SendWithRetryAsync(() =>
+        return OpenDownloadAsync(url, $"section_{sectionId}", ct);
+    }
+
+    /// <summary>Gemeinsame Download-Logik: Antwort-Stream + Dateiname aus Content-Disposition.</summary>
+    private async Task<DownloadStream> OpenDownloadAsync(string url, string fallbackName, CancellationToken ct)
+    {
+        var resp = await SendWithRetryAsync(() =>
         {
             var r = new HttpRequestMessage(HttpMethod.Get, url);
             r.Headers.Accept.ParseAdd("application/octet-stream");
             r.Headers.Accept.ParseAdd("*/*");
             return r;
-        }, ct).ConfigureAwait(false);
+        }, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
-        resp.EnsureSuccessStatusCode();
-
-        var data = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        var fileName = GetFileNameFromContentDisposition(resp) ?? $"section_{sectionId}";
-        return new DownloadResult(data, fileName);
+        try
+        {
+            resp.EnsureSuccessStatusCode();
+            var fileName = GetFileNameFromContentDisposition(resp) ?? fallbackName;
+            var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            return new DownloadStream(resp, fileName, stream);
+        }
+        catch
+        {
+            resp.Dispose();
+            throw;
+        }
     }
 
     // =====================================================================
@@ -603,6 +646,30 @@ public sealed class DocuWareClient : IDisposable
         var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.Accept.ParseAdd("application/json");
         return req;
+    }
+
+    /// <summary>Sucht im Antwort-Objekt nach dem HATEOAS-Link mit rel="next" und löst ihn auf.</summary>
+    private string? ExtractNextLink(JsonElement root)
+    {
+        if (!root.TryGetProperty("Links", out var links) || links.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var link in links.EnumerateArray())
+        {
+            var rel = TryGetString(link, "rel");
+            if (!string.Equals(rel, "next", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var href = TryGetString(link, "href");
+            if (string.IsNullOrWhiteSpace(href))
+                return null;
+
+            // Absolute URL direkt nutzen, relative gegen die Server-Wurzel auflösen.
+            if (href.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                return href;
+            return _serverRoot + (href.StartsWith("/") ? href : "/" + href);
+        }
+        return null;
     }
 
     private void ClearCookies()
@@ -627,7 +694,6 @@ public sealed class DocuWareClient : IDisposable
                 return name.Trim('"');
         }
 
-        // Manche Server liefern den Header nicht typisiert – manuell parsen.
         if (resp.Content.Headers.TryGetValues("Content-Disposition", out var values))
         {
             foreach (var v in values)
