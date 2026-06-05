@@ -105,7 +105,7 @@ partial class MainForm
         btnReload.Click += BtnReload_Click; tabSettings.Controls.Add(btnReload);
 
         // ----- Tab Verbindung & Archiv -----
-        var cardConn = Theme.Card(12, 12, cardW, 210);
+        var cardConn = Theme.CardPanel(12, 12, cardW, 210);
         tabConn.Controls.Add(cardConn);
         Section(cardConn, "Schritt 1 – Anmelden", 16, 12);
         btnLogin = new Button { Text = "Anmelden / Archive laden", Left = 16, Top = 44, Width = 240 };
@@ -125,7 +125,7 @@ partial class MainForm
         btnLoadFields.Click += BtnLoadFields_Click; cardConn.Controls.Add(btnLoadFields);
 
         // ----- Tab Ausführen & Dienst -----
-        var cardProfile = Theme.Card(12, 12, cardW, 88);
+        var cardProfile = Theme.CardPanel(12, 12, cardW, 88);
         tabRun.Controls.Add(cardProfile);
         Section(cardProfile, "Profil (Job)", 16, 12);
         Lbl(cardProfile, "Profil:", 16, 46, 60);
@@ -138,7 +138,7 @@ partial class MainForm
         btnProfileSave = new Button { Text = "Als Profil speichern", Left = 542, Top = 45, Width = 170 };
         btnProfileSave.Click += BtnProfileSave_Click; cardProfile.Controls.Add(btnProfileSave);
 
-        var cardRun = Theme.Card(12, 108, cardW, 170);
+        var cardRun = Theme.CardPanel(12, 108, cardW, 170);
         tabRun.Controls.Add(cardRun);
         Section(cardRun, "Ausführen", 16, 12);
         btnExportNow = new Button { Text = "Export jetzt", Left = 16, Top = 44, Width = 150 };
@@ -160,7 +160,7 @@ partial class MainForm
         progressBar = new ProgressBar { Left = 16, Top = 124, Width = 754, Height = 18, Style = ProgressBarStyle.Continuous };
         cardRun.Controls.Add(progressBar);
 
-        var cardSvc = Theme.Card(12, 286, cardW, 120);
+        var cardSvc = Theme.CardPanel(12, 286, cardW, 120);
         tabRun.Controls.Add(cardSvc);
         Section(cardSvc, "Windows-Dienst", 16, 12);
         btnSvcInstall = new Button { Text = "Installieren", Left = 16, Top = 42, Width = 150 };
@@ -177,7 +177,7 @@ partial class MainForm
         cardSvc.Controls.Add(lblProgress);
 
         // ----- Tab Protokoll -----
-        var cardLog = Theme.Card(12, 12, cardW, 500);
+        var cardLog = Theme.CardPanel(12, 12, cardW, 500);
         cardLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
         tabLog.Controls.Add(cardLog);
         Section(cardLog, "Protokoll", 16, 12);

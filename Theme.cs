@@ -61,7 +61,7 @@ internal static class Theme
         b.FlatAppearance.MouseDownBackColor = Border;
     }
 
-    public static Panel Card(int left, int top, int width, int height) => new()
+    public static Panel CardPanel(int left, int top, int width, int height) => new()
     {
         Left = left, Top = top, Width = width, Height = height,
         BackColor = Card, BorderStyle = BorderStyle.FixedSingle

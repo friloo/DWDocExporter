@@ -145,7 +145,7 @@ public partial class MainForm : Form
     //  Validierung
     // =====================================================================
 
-    private List<string> Validate(bool requireArchive)
+    private List<string> ValidateConfig(bool requireArchive)
     {
         var p = new List<string>();
         if (string.IsNullOrWhiteSpace(_opt.Server) ||
@@ -166,7 +166,7 @@ public partial class MainForm : Form
 
     private bool ValidateAndReport(bool requireArchive)
     {
-        var problems = Validate(requireArchive);
+        var problems = ValidateConfig(requireArchive);
         if (problems.Count == 0) return true;
         Log("Konfiguration unvollständig:");
         foreach (var x in problems) Log("  • " + x);
