@@ -1,0 +1,15 @@
+# .NET Build-Ausgaben
+bin/
+obj/
+*.user
+
+# Lokale Laufzeitdaten (nicht versionieren)
+config.json
+*.db
+*.db-wal
+*.db-shm
+*.part
+
+# IDE
+.vs/
+.idea/
