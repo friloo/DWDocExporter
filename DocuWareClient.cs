@@ -37,6 +37,9 @@ public sealed record DocumentPage(List<DwDocument> Items, string? NextUrl);
 /// <summary>Kurzinfo zu einem Archiv (DocuWare File Cabinet) – ohne Baskets.</summary>
 public sealed record FileCabinetInfo(string Id, string Name);
 
+/// <summary>Kurzinfo zu einer Dokument-Sektion (für gezielten Download/Filter).</summary>
+public sealed record SectionInfo(string Id, string? FileName, string? ContentType);
+
 /// <summary>
 /// Kapselt sämtliche Kommunikation mit der DocuWare Platform REST API.
 /// Unterstützt Cookie-Login (klassisch / On-Prem) sowie Token-Login über den
@@ -60,12 +63,21 @@ public sealed class DocuWareClient : IDisposable
     private string? _refreshToken;
     private string? _tokenEndpoint;
     private DateTimeOffset _tokenExpiresUtc = DateTimeOffset.MinValue;
+    // Vom Identity Service laut OpenID-Discovery tatsächlich unterstützte Scopes.
+    private string[] _supportedScopes = Array.Empty<string>();
+    // Letzter Fehlertext einer Token-Anforderung (für aussagekräftige Meldungen).
+    private string? _lastTokenError;
 
     // Standardparameter für den DocuWare Identity Service (Resource Owner Password Grant).
     // Verifiziert gegen DocuWare-Doku (KBA-37505 / developer.docuware.com OAuth Support).
     private const string DefaultClientId = "docuware.platform.net.client";
-    private const string PasswordScope = "docuware.platform offline_access";
-    private const string ClientCredentialsScope = "docuware.platform";
+    // Wunsch-Scopes; werden vor der Anforderung gegen scopes_supported gefiltert,
+    // damit ein nicht angebotener Scope (z. B. offline_access) keinen invalid_scope auslöst.
+    private static readonly string[] PasswordScopes =
+        { "docuware.platform", "dwprofile", "openid", "offline_access" };
+    private static readonly string[] ClientCredentialsScopes = { "docuware.platform" };
+    // Pflicht-Scope, der immer angefordert wird (auch wenn die Discovery nichts liefert).
+    private const string EssentialScope = "docuware.platform";
 
     /// <summary>Basis-URL der Plattform, z. B. https://server/DocuWare/Platform</summary>
     public string PlatformBaseUrl { get; }
@@ -150,7 +162,13 @@ public sealed class DocuWareClient : IDisposable
     /// <summary>Baut den Download-Query-String aus den Optionen (Zielformat, Annotationen).</summary>
     private string DownloadQuery()
     {
-        var fileType = string.IsNullOrWhiteSpace(_opt.TargetFileType) ? "Auto" : _opt.TargetFileType;
+        var fileType = _opt.TargetFileType;
+        // DocuWare kennt nur Auto/PDF/PDFA. "Original" ist KEIN gültiger Wert (führt zu
+        // HTTP 400). "Auto" liefert ohnehin das Originalformat (z. B. EML/MSG/PDF).
+        if (string.IsNullOrWhiteSpace(fileType)
+            || fileType.Equals("Original", StringComparison.OrdinalIgnoreCase)
+            || fileType.Equals("Originalformat", StringComparison.OrdinalIgnoreCase))
+            fileType = "Auto";
         var keep = _opt.KeepAnnotations ? "true" : "false";
         return $"?targetFileType={Uri.EscapeDataString(fileType)}&keepAnnotations={keep}";
     }
@@ -299,6 +317,17 @@ public sealed class DocuWareClient : IDisposable
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new InvalidOperationException("Kein token_endpoint in der OpenID-Konfiguration gefunden.");
 
+        // Unterstützte Scopes merken, um die Anforderung darauf einzuschränken.
+        if (doc.RootElement.TryGetProperty("scopes_supported", out var scopesEl)
+            && scopesEl.ValueKind == JsonValueKind.Array)
+        {
+            _supportedScopes = scopesEl.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString()!)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToArray();
+        }
+
         return endpoint;
     }
 
@@ -319,7 +348,7 @@ public sealed class DocuWareClient : IDisposable
             form = new Dictionary<string, string>
             {
                 ["grant_type"] = "client_credentials",
-                ["scope"] = ClientCredentialsScope,
+                ["scope"] = BuildScope(ClientCredentialsScopes),
                 ["client_id"] = string.IsNullOrWhiteSpace(_opt.OAuthClientId) ? DefaultClientId : _opt.OAuthClientId,
                 ["client_secret"] = _opt.OAuthClientSecret
             };
@@ -332,7 +361,7 @@ public sealed class DocuWareClient : IDisposable
             form = new Dictionary<string, string>
             {
                 ["grant_type"] = "password",
-                ["scope"] = PasswordScope,
+                ["scope"] = BuildScope(PasswordScopes),
                 ["client_id"] = string.IsNullOrWhiteSpace(_opt.OAuthClientId) ? DefaultClientId : _opt.OAuthClientId,
                 ["username"] = _opt.User,
                 ["password"] = _opt.Password
@@ -342,17 +371,70 @@ public sealed class DocuWareClient : IDisposable
                 form["acr_values"] = $"organization:{_opt.Organization}";
         }
 
+        var body = await PostTokenFormAsync(form, ct).ConfigureAwait(false);
+
+        // Sicherheitsnetz: Lehnt der Server einen Scope ab (invalid_scope), Wiederholung
+        // nur mit dem Pflicht-Scope docuware.platform – das funktioniert auf allen Tenants.
+        if (body is null && form.TryGetValue("scope", out var usedScope)
+            && !string.Equals(usedScope, EssentialScope, StringComparison.OrdinalIgnoreCase))
+        {
+            _log?.Invoke($"Scope \"{usedScope}\" abgelehnt – erneuter Versuch nur mit \"{EssentialScope}\".");
+            form["scope"] = EssentialScope;
+            body = await PostTokenFormAsync(form, ct).ConfigureAwait(false);
+        }
+
+        if (body is null)
+            throw new InvalidOperationException(_lastTokenError ?? "Token-Anforderung fehlgeschlagen.");
+
+        ApplyTokenResponse(body);
+    }
+
+    /// <summary>
+    /// Sendet das Token-Formular. Liefert den Antwort-Body bei Erfolg, andernfalls
+    /// <c>null</c>, wenn der Server den Scope ablehnt (invalid_scope) und ein erneuter
+    /// Versuch sinnvoll ist. Bei allen anderen Fehlern wird eine Ausnahme geworfen.
+    /// </summary>
+    private async Task<string?> PostTokenFormAsync(Dictionary<string, string> form, CancellationToken ct)
+    {
         using var content = new FormUrlEncodedContent(form);
         using var req = new HttpRequestMessage(HttpMethod.Post, _tokenEndpoint) { Content = content };
         req.Headers.Accept.ParseAdd("application/json");
 
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        if (!resp.IsSuccessStatusCode)
-            throw new InvalidOperationException(
-                $"Token-Anforderung fehlgeschlagen (HTTP {(int)resp.StatusCode}). {body}");
 
-        ApplyTokenResponse(body);
+        if (resp.IsSuccessStatusCode)
+            return body;
+
+        _lastTokenError = $"Token-Anforderung fehlgeschlagen (HTTP {(int)resp.StatusCode}). {body}";
+
+        // invalid_scope signalisiert: mit reduziertem Scope erneut versuchen.
+        if (resp.StatusCode == HttpStatusCode.BadRequest
+            && body.IndexOf("invalid_scope", StringComparison.OrdinalIgnoreCase) >= 0)
+            return null;
+
+        throw new InvalidOperationException(_lastTokenError);
+    }
+
+    /// <summary>
+    /// Stellt den Scope-Parameter zusammen. Sind die vom Identity Service angebotenen
+    /// Scopes bekannt (scopes_supported aus der Discovery), werden nur unterstützte
+    /// Wunsch-Scopes angefordert; so kann ein nicht angebotener Scope keinen
+    /// invalid_scope-Fehler verursachen. Andernfalls Rückfall auf den Pflicht-Scope.
+    /// </summary>
+    private string BuildScope(IEnumerable<string> desired)
+    {
+        if (_supportedScopes.Length == 0)
+            return EssentialScope;
+
+        var supported = new HashSet<string>(_supportedScopes, StringComparer.OrdinalIgnoreCase);
+        var selected = desired.Where(supported.Contains).ToList();
+
+        // docuware.platform ist zwingend nötig, auch falls es nicht in der Liste auftaucht.
+        if (!selected.Any(s => string.Equals(s, EssentialScope, StringComparison.OrdinalIgnoreCase)))
+            selected.Insert(0, EssentialScope);
+
+        return string.Join(' ', selected);
     }
 
     /// <summary>Erneuert das Access-Token über das refresh_token (sonst Neuanforderung).</summary>
@@ -522,7 +604,7 @@ public sealed class DocuWareClient : IDisposable
         return list;
     }
 
-    /// <summary>Liefert die Indexfeld-Namen (DBName) eines Archivs.</summary>
+    /// <summary>Liefert die Indexfeld-Namen (DBFieldName) eines Archivs.</summary>
     public async Task<List<string>> GetFieldNamesAsync(string fileCabinetId, CancellationToken ct)
     {
         using var resp = await SendWithRetryAsync(
@@ -539,9 +621,22 @@ public sealed class DocuWareClient : IDisposable
         {
             foreach (var f in fields.EnumerateArray())
             {
-                var dbName = TryGetString(f, "DBName") ?? TryGetString(f, "DbName");
-                if (!string.IsNullOrEmpty(dbName))
-                    names.Add(dbName);
+                // Technischer Feldname; identisch zum "FieldName" in den Dokumentdaten.
+                // (DocuWare-Schema: DBFieldName, früher fälschlich als DBName gelesen.)
+                var dbName = TryGetString(f, "DBFieldName")
+                             ?? TryGetString(f, "DBName")
+                             ?? TryGetString(f, "DbName");
+                var display = TryGetString(f, "DisplayName") ?? TryGetString(f, "Name");
+                if (string.IsNullOrEmpty(dbName))
+                    continue;
+
+                // Beim Laden im Log auch den Anzeigenamen zeigen, damit das richtige
+                // Feld leichter erkannt wird (das Dropdown nutzt den technischen Namen).
+                if (!string.IsNullOrEmpty(display) &&
+                    !string.Equals(display, dbName, StringComparison.OrdinalIgnoreCase))
+                    _log?.Invoke($"Feld: {dbName}  (Anzeige: {display})");
+
+                names.Add(dbName);
             }
         }
         return names;
@@ -654,35 +749,80 @@ public sealed class DocuWareClient : IDisposable
         return OpenDownloadAsync(url, $"document_{docId}", ct);
     }
 
-    /// <summary>Liefert die Sektions-IDs eines Dokuments (für DownloadPerSection).</summary>
-    public async Task<List<string>> GetSectionIdsAsync(string fileCabinetId, string docId, CancellationToken ct)
+    /// <summary>
+    /// Liefert die Sektionen eines Dokuments. Folgt der HATEOAS-Relation "sections"
+    /// des Dokuments (die korrekte URL kommt vom Server – ein geratener Pfad wie
+    /// .../Documents/{id}/Sections führt je nach Version zu HTTP 404).
+    /// </summary>
+    public async Task<List<SectionInfo>> GetSectionsAsync(string fileCabinetId, string docId, CancellationToken ct)
     {
-        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}/Sections";
+        // 1) Dokumentdetails laden – enthalten die Links (u. a. "sections").
+        var docUrl = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}";
+        var docJson = await GetStringAsync(docUrl, ct).ConfigureAwait(false);
+        using var docDoc = JsonDocument.Parse(docJson);
+        var docRoot = docDoc.RootElement;
+
+        // 2) Über die "sections"-Relation die Sektionsliste holen.
+        var sectionsUrl = ExtractLink(docRoot, "sections");
+        if (!string.IsNullOrWhiteSpace(sectionsUrl))
+        {
+            var secJson = await GetStringAsync(sectionsUrl, ct).ConfigureAwait(false);
+            using var secDoc = JsonDocument.Parse(secJson);
+            var list = ParseSections(secDoc.RootElement);
+            if (list.Count > 0)
+                return list;
+        }
+
+        // 3) Fallback: eventuell sind die Sektionen direkt im Dokument eingebettet.
+        return ParseSections(docRoot);
+    }
+
+    /// <summary>Liest eine Sektionsliste aus verschiedenen möglichen JSON-Formen.</summary>
+    private static List<SectionInfo> ParseSections(JsonElement root)
+    {
+        var list = new List<SectionInfo>();
+
+        JsonElement arr;
+        if (root.ValueKind == JsonValueKind.Array)
+            arr = root;
+        else if (root.TryGetProperty("Section", out var s) && s.ValueKind == JsonValueKind.Array)
+            arr = s;
+        else if (root.TryGetProperty("Sections", out var ss))
+        {
+            if (ss.ValueKind == JsonValueKind.Array) arr = ss;
+            else if (ss.TryGetProperty("Section", out var s2) && s2.ValueKind == JsonValueKind.Array) arr = s2;
+            else return list;
+        }
+        else return list;
+
+        foreach (var sec in arr.EnumerateArray())
+        {
+            var id = TryGetString(sec, "Id");
+            if (string.IsNullOrEmpty(id))
+                continue;
+            var fileName = TryGetString(sec, "OriginalFileName")
+                           ?? TryGetString(sec, "FileName")
+                           ?? TryGetString(sec, "Name");
+            var contentType = TryGetString(sec, "ContentType");
+            list.Add(new SectionInfo(id, fileName, contentType));
+        }
+        return list;
+    }
+
+    /// <summary>GET mit Wiederholung und JSON-Accept; liefert den Antworttext.</summary>
+    private async Task<string> GetStringAsync(string url, CancellationToken ct)
+    {
         using var resp = await SendWithRetryAsync(
             () => JsonGet(url), HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
-
-        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        using var doc = JsonDocument.Parse(json);
-
-        var ids = new List<string>();
-        if (doc.RootElement.TryGetProperty("Section", out var arr) &&
-            arr.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var s in arr.EnumerateArray())
-            {
-                var id = TryGetString(s, "Id");
-                if (!string.IsNullOrEmpty(id))
-                    ids.Add(id);
-            }
-        }
-        return ids;
+        return await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>Öffnet den Originalformat-Download einer Sektion (gestreamt).</summary>
-    public Task<DownloadStream> OpenSectionDownloadAsync(string sectionId, CancellationToken ct)
+    public Task<DownloadStream> OpenSectionDownloadAsync(string fileCabinetId, string sectionId, CancellationToken ct)
     {
-        var url = $"{PlatformBaseUrl}/Sections/{sectionId}/Data" + DownloadQuery();
+        // Korrekter Endpunkt inkl. FileCabinet-Kontext (ohne diesen liefert die API 404).
+        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Sections/{sectionId}/Data" + DownloadQuery();
         return OpenDownloadAsync(url, $"section_{sectionId}", ct);
     }
 
@@ -723,15 +863,17 @@ public sealed class DocuWareClient : IDisposable
     }
 
     /// <summary>Sucht im Antwort-Objekt nach dem HATEOAS-Link mit rel="next" und löst ihn auf.</summary>
-    private string? ExtractNextLink(JsonElement root)
+    private string? ExtractNextLink(JsonElement root) => ExtractLink(root, "next");
+
+    /// <summary>Sucht den HATEOAS-Link mit der angegebenen Relation und löst ihn (absolut) auf.</summary>
+    private string? ExtractLink(JsonElement root, string rel)
     {
         if (!root.TryGetProperty("Links", out var links) || links.ValueKind != JsonValueKind.Array)
             return null;
 
         foreach (var link in links.EnumerateArray())
         {
-            var rel = TryGetString(link, "rel");
-            if (!string.Equals(rel, "next", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(TryGetString(link, "rel"), rel, StringComparison.OrdinalIgnoreCase))
                 continue;
 
             var href = TryGetString(link, "href");

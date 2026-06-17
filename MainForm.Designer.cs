@@ -40,6 +40,21 @@ partial class MainForm
     private Label lblServiceStatus;
     private Label lblProgress;
 
+    // Tab 3 – Schnelleinstellungen / Filter / Aktionen
+    private TextBox txtQuickOutput;
+    private Button btnBrowseOutput;
+    private ComboBox cboQuickFormat;
+    private TextBox txtQuickExt;
+    private NumericUpDown numBatch;
+    private ComboBox cboQuickFilterField;
+    private TextBox txtQuickFrom;
+    private TextBox txtQuickTo;
+    private Button btnCountDocs;
+    private Label lblDocCount;
+    private Button btnOpenOutput;
+    private Button btnOpenLog;
+    private Button btnResetState;
+
     private LinkLabel lnkAuthor;
     private TextBox txtLog;
     private TabControl tabs;
@@ -73,7 +88,7 @@ partial class MainForm
             Font = Theme.Section(), ForeColor = Theme.Accent, BackColor = Color.Transparent
         });
 
-        const int cardW = 788;
+        const int cardW = 1140;
 
         // ---------- Header ----------
         var header = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Accent };
@@ -176,6 +191,64 @@ partial class MainForm
         lblProgress = new Label { Text = "Fortschritt: –", Left = 384, Top = 86, Width = 390, Font = Theme.Base() };
         cardSvc.Controls.Add(lblProgress);
 
+        // ----- Tab Ausführen: Schnelleinstellungen & Filter -----
+        tabRun.AutoScroll = true;
+        var cardQuick = Theme.CardPanel(12, 414, cardW, 196);
+        tabRun.Controls.Add(cardQuick);
+        Section(cardQuick, "Schnelleinstellungen & Filter", 16, 12);
+
+        Lbl(cardQuick, "Ausgabeordner:", 16, 44, 120);
+        txtQuickOutput = new TextBox { Left = 140, Top = 44, Width = cardW - 270, BackColor = Theme.InputBg, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle };
+        cardQuick.Controls.Add(txtQuickOutput);
+        btnBrowseOutput = new Button { Text = "Durchsuchen …", Left = cardW - 120, Top = 43, Width = 104 };
+        btnBrowseOutput.Click += BtnBrowseOutput_Click; cardQuick.Controls.Add(btnBrowseOutput);
+
+        Lbl(cardQuick, "Zielformat:", 16, 80, 120);
+        cboQuickFormat = new ComboBox { Left = 140, Top = 80, Width = 120, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        cboQuickFormat.Items.AddRange(new object[] { "Auto", "PDF", "PDFA" });
+        cardQuick.Controls.Add(cboQuickFormat);
+        Lbl(cardQuick, "Nur Endung (z. B. eml):", 280, 80, 150);
+        txtQuickExt = new TextBox { Left = 432, Top = 80, Width = 120, BackColor = Theme.InputBg, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle };
+        cardQuick.Controls.Add(txtQuickExt);
+        Lbl(cardQuick, "Max. pro Lauf (0=alle):", 580, 80, 160);
+        numBatch = new NumericUpDown { Left = 744, Top = 80, Width = 100, Minimum = 0, Maximum = 1000000, BackColor = Theme.InputBg, ForeColor = Theme.Text };
+        cardQuick.Controls.Add(numBatch);
+
+        Lbl(cardQuick, "Datumsfilter – Feld:", 16, 120, 140);
+        cboQuickFilterField = new ComboBox { Left = 160, Top = 120, Width = 220, DropDownStyle = ComboBoxStyle.DropDown };
+        cardQuick.Controls.Add(cboQuickFilterField);
+        Lbl(cardQuick, "von:", 400, 120, 40);
+        txtQuickFrom = new TextBox { Left = 444, Top = 120, Width = 130, BackColor = Theme.InputBg, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle };
+        cardQuick.Controls.Add(txtQuickFrom);
+        Lbl(cardQuick, "bis:", 588, 120, 40);
+        txtQuickTo = new TextBox { Left = 628, Top = 120, Width = 130, BackColor = Theme.InputBg, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle };
+        cardQuick.Controls.Add(txtQuickTo);
+        Lbl(cardQuick, "Datum als TT.MM.JJJJ oder ISO. Leer = kein Filter. Änderungen erscheinen auch im Tab \"Einstellungen\".", 16, 156, cardW - 40, Theme.Subtitle(), Theme.Subtle);
+
+        txtQuickOutput.TextChanged += QuickChanged;
+        cboQuickFormat.SelectedIndexChanged += QuickChanged;
+        txtQuickExt.TextChanged += QuickChanged;
+        numBatch.ValueChanged += QuickChanged;
+        cboQuickFilterField.TextChanged += QuickChanged;
+        cboQuickFilterField.SelectedIndexChanged += QuickChanged;
+        txtQuickFrom.TextChanged += QuickChanged;
+        txtQuickTo.TextChanged += QuickChanged;
+
+        // ----- Tab Ausführen: Aktionen -----
+        var cardActions = Theme.CardPanel(12, 622, cardW, 110);
+        tabRun.Controls.Add(cardActions);
+        Section(cardActions, "Aktionen", 16, 12);
+        btnCountDocs = new Button { Text = "Dokumente zählen", Left = 16, Top = 44, Width = 180 };
+        btnCountDocs.Click += BtnCountDocs_Click; cardActions.Controls.Add(btnCountDocs);
+        btnOpenOutput = new Button { Text = "Ausgabeordner öffnen", Left = 206, Top = 44, Width = 190 };
+        btnOpenOutput.Click += BtnOpenOutput_Click; cardActions.Controls.Add(btnOpenOutput);
+        btnOpenLog = new Button { Text = "Logdatei öffnen", Left = 406, Top = 44, Width = 160 };
+        btnOpenLog.Click += BtnOpenLog_Click; cardActions.Controls.Add(btnOpenLog);
+        btnResetState = new Button { Text = "Status-DB zurücksetzen", Left = 576, Top = 44, Width = 200 };
+        btnResetState.Click += BtnResetState_Click; cardActions.Controls.Add(btnResetState);
+        lblDocCount = new Label { Text = "Archiv: – Dokumente", Left = 16, Top = 82, Width = cardW - 40, Font = Theme.Base(), ForeColor = Theme.Subtle };
+        cardActions.Controls.Add(lblDocCount);
+
         // ----- Tab Protokoll -----
         var cardLog = Theme.CardPanel(12, 12, cardW, 500);
         cardLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
@@ -213,7 +286,8 @@ partial class MainForm
         Theme.Primary(btnLogin); Theme.Primary(btnSave); Theme.Primary(btnExportNow); Theme.Primary(btnSvcStart);
         foreach (var b in new[] { btnTest, btnLoadFields, btnReload, btnProfileNew, btnProfileDelete, btnProfileSave,
                                   btnDryRun, btnVerify, btnRetry, btnCancel, btnZip, btnManifest,
-                                  btnSvcInstall, btnSvcStop, btnSvcUninstall })
+                                  btnSvcInstall, btnSvcStop, btnSvcUninstall,
+                                  btnBrowseOutput, btnCountDocs, btnOpenOutput, btnOpenLog, btnResetState })
             Theme.Secondary(b);
 
         statusTimer = new System.Windows.Forms.Timer(components) { Interval = 2000 };
@@ -223,8 +297,8 @@ partial class MainForm
         AutoScaleMode = AutoScaleMode.Font;
         Font = Theme.Base();
         BackColor = Theme.Bg;
-        ClientSize = new Size(820, 690);
-        MinimumSize = new Size(836, 640);
+        ClientSize = new Size(1180, 920);
+        MinimumSize = new Size(900, 680);
         Text = "DwDocExport – DocuWare Dokument-Export";
         StartPosition = FormStartPosition.CenterScreen;
 

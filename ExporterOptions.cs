@@ -99,7 +99,8 @@ public sealed class ExporterOptions
     public bool SetFileDateFromField { get; set; } = false;
 
     // --- 05 Download ---
-    [Category("05 Download"), DisplayName("Zielformat"), Description("Auto liefert das Originalformat (z. B. EML/MSG/PDF).")]
+    [Category("05 Download"), DisplayName("Zielformat"), Description("Gültig: Auto, PDF, PDFA. Auto liefert das Originalformat (z. B. EML/MSG/PDF). 'Original' ist KEIN gültiger Wert!")]
+    [TypeConverter(typeof(TargetFileTypeConverter))]
     public string TargetFileType { get; set; } = "Auto";
 
     [Category("05 Download"), DisplayName("Annotationen einbrennen")]
@@ -107,6 +108,10 @@ public sealed class ExporterOptions
 
     [Category("05 Download"), DisplayName("Pro Sektion herunterladen")]
     public bool DownloadPerSection { get; set; } = false;
+
+    [Category("05 Download"), DisplayName("Nur Sektionen mit Endung"),
+     Description("z. B. eml oder eml,msg — lädt nur passende Sektionen einzeln (kein ZIP). Leer = alle.")]
+    public string SectionExtensionFilter { get; set; } = "";
 
     // --- 06 Leistung ---
     [Category("06 Leistung"), DisplayName("Seitengröße")]
@@ -123,6 +128,9 @@ public sealed class ExporterOptions
 
     [Category("06 Leistung"), DisplayName("Bandbreite (Byte/s)"), Description("0 = unbegrenzt.")]
     public long MaxBytesPerSecond { get; set; } = 0;
+
+    [Category("06 Leistung"), DisplayName("Max. Dokumente pro Lauf"), Description("0 = alle. Sonst werden pro Lauf höchstens so viele (noch offene) Dokumente verarbeitet, z. B. 50.")]
+    public int MaxDocumentsPerRun { get; set; } = 0;
 
     // --- 07 Integrität ---
     [Category("07 Integrität"), DisplayName("SHA-256 berechnen")]
@@ -200,6 +208,7 @@ public sealed class ExporterOptions
 
     // --- 12 Logging ---
     [Category("12 Logging"), DisplayName("Min. Loglevel"), Description("Trace/Debug/Information/Warning/Error.")]
+    [TypeConverter(typeof(LogLevelConverter))]
     public string MinLogLevel { get; set; } = "Information";
 
     [Category("12 Logging"), DisplayName("Max. Logdateigröße (MB)")]
@@ -207,6 +216,7 @@ public sealed class ExporterOptions
 
     // --- 13 Oberfläche ---
     [Category("13 Oberfläche"), DisplayName("Sprache"), Description("de oder en.")]
+    [TypeConverter(typeof(LanguageConverter))]
     public string Language { get; set; } = "de";
 
     [Category("13 Oberfläche"), DisplayName("Dunkles Design")]
@@ -276,4 +286,34 @@ public sealed class ExporterOptions
         copy.FieldConditions ??= new();
         return copy;
     }
+}
+
+/// <summary>
+/// Basis für TypeConverter, die einer string-Eigenschaft eine feste Auswahlliste
+/// (Dropdown) im PropertyGrid geben.
+/// </summary>
+public abstract class FixedValuesConverter : StringConverter
+{
+    protected abstract string[] Values { get; }
+    public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
+    public override bool GetStandardValuesExclusive(ITypeDescriptorContext? context) => true;
+    public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context) => new(Values);
+}
+
+/// <summary>Auswahl für das DocuWare-Zielformat (gültige FileDownloadType-Werte).</summary>
+public sealed class TargetFileTypeConverter : FixedValuesConverter
+{
+    protected override string[] Values => new[] { "Auto", "PDF", "PDFA" };
+}
+
+/// <summary>Auswahl für den minimalen Log-Level.</summary>
+public sealed class LogLevelConverter : FixedValuesConverter
+{
+    protected override string[] Values => new[] { "Trace", "Debug", "Information", "Warning", "Error" };
+}
+
+/// <summary>Auswahl für die Oberflächensprache.</summary>
+public sealed class LanguageConverter : FixedValuesConverter
+{
+    protected override string[] Values => new[] { "de", "en" };
 }

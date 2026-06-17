@@ -128,9 +128,20 @@ public sealed class ExportEngine
 
         Report(mode == ExportMode.DryRun ? "Trockenlauf" : "Export", null);
 
+        // Optionales Limit pro Lauf (0 = alle). Begrenzt die Zahl der angestoßenen Dokumente.
+        var maxDocs = Math.Max(0, _opt.MaxDocumentsPerRun);
+        var dispatched = 0;
+
         foreach (var doc in Source())
         {
             ct.ThrowIfCancellationRequested();
+
+            if (maxDocs > 0 && dispatched >= maxDocs)
+            {
+                Log($"Limit erreicht: max. {maxDocs} Dokument(e) pro Lauf.");
+                break;
+            }
+            dispatched++;
 
             if (mode == ExportMode.DryRun)
             {
@@ -248,18 +259,54 @@ public sealed class ExportEngine
     private async Task<(string path, string? sha)> ExportDocumentAsync(
         DocuWareClient client, DwDocument doc, CancellationToken ct)
     {
-        if (_opt.DownloadPerSection)
+        var extFilter = ParseExtensionFilter(_opt.SectionExtensionFilter);
+
+        // Ein gesetzter Endungs-Filter erzwingt den Sektions-Download, da der
+        // FileDownload-Endpunkt bei mehreren Sektionen ein ZIP zurückgibt.
+        if (_opt.DownloadPerSection || extFilter.Count > 0)
         {
-            var sectionIds = await client.GetSectionIdsAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
+            var sections = await client.GetSectionsAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
             string? lastPath = null;
             string? lastSha = null;
-            var index = 0;
-            foreach (var sid in sectionIds)
+            var saved = 0;
+            foreach (var sec in sections)
             {
-                using var dl = await client.OpenSectionDownloadAsync(sid, ct).ConfigureAwait(false);
-                (lastPath, lastSha) = await SaveAsync(doc, dl, index, ct).ConfigureAwait(false);
-                index++;
+                // Vorabfilter anhand der Metadaten (OriginalFileName) – spart Downloads.
+                if (extFilter.Count > 0 && !string.IsNullOrEmpty(sec.FileName)
+                    && !MatchesExtension(sec.FileName!, extFilter))
+                    continue;
+
+                using var dl = await client.OpenSectionDownloadAsync(_opt.FileCabinetId, sec.Id, ct).ConfigureAwait(false);
+
+                // Falls keine Metadaten vorlagen: nach dem Content-Disposition-Namen prüfen.
+                var effectiveName = !string.IsNullOrEmpty(sec.FileName) ? sec.FileName! : dl.FileName;
+                if (extFilter.Count > 0 && !MatchesExtension(effectiveName, extFilter))
+                    continue;
+
+                // Bei aktivem Filter die erste Treffer-Datei ohne "_sNN"-Suffix speichern
+                // (sauberer Name); weitere Treffer bekommen einen Suffix gegen Kollisionen.
+                int? sectionArg = extFilter.Count > 0
+                    ? (saved == 0 ? (int?)null : saved)
+                    : saved;
+
+                (lastPath, lastSha) = await SaveAsync(doc, dl, sectionArg, ct).ConfigureAwait(false);
+                saved++;
             }
+
+            if (extFilter.Count > 0)
+            {
+                // Mit aktivem Filter NICHT auf den (ZIP-)Gesamtdownload zurückfallen.
+                if (saved == 0)
+                {
+                    var available = string.Join(", ",
+                        sections.Select(s => s.FileName ?? s.ContentType ?? s.Id));
+                    throw new InvalidOperationException(
+                        $"Keine Sektion mit Endung {string.Join("/", extFilter)} gefunden. " +
+                        $"Vorhandene Sektionen: {(available.Length > 0 ? available : "(keine)")}.");
+                }
+                return (lastPath!, lastSha);
+            }
+
             if (lastPath == null)
             {
                 using var dl = await client.OpenDocumentDownloadAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
@@ -272,6 +319,23 @@ public sealed class ExportEngine
             using var dl = await client.OpenDocumentDownloadAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
             return await SaveAsync(doc, dl, null, ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>Zerlegt den Endungs-Filter ("eml,msg") in eine normalisierte Menge ("eml","msg").</summary>
+    private static HashSet<string> ParseExtensionFilter(string? raw)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(raw))
+            return set;
+        foreach (var part in raw.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            set.Add(part.TrimStart('.').Trim());
+        return set;
+    }
+
+    private static bool MatchesExtension(string fileName, HashSet<string> extFilter)
+    {
+        var ext = Path.GetExtension(fileName).TrimStart('.');
+        return ext.Length > 0 && extFilter.Contains(ext);
     }
 
     private async Task<(string path, string? sha)> SaveAsync(DwDocument doc, DownloadStream dl, int? section, CancellationToken ct)
