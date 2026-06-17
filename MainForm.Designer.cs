@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.Windows.Forms;
 
 namespace DwDocExport;
@@ -7,38 +8,41 @@ partial class MainForm
 {
     private System.ComponentModel.IContainer components = null;
 
-    // --- Eingabefelder ---
-    private TextBox txtServer;
-    private TextBox txtOrganization;
-    private TextBox txtUser;
-    private TextBox txtPassword;
-    private ComboBox cboAuthMode;
-    private ComboBox cboFileCabinet;
-    private TextBox txtOutputRoot;
-    private TextBox txtStateDb;
-    private ComboBox cboDateField;
-    private NumericUpDown numHashDepth;
-    private NumericUpDown numPageSize;
-    private NumericUpDown numDelay;
-    private NumericUpDown numRetries;
-    private CheckBox chkPerSection;
-    private NumericUpDown numRescan;
+    private PropertyGrid propGrid;
 
-    // --- Aktionsschaltflächen ---
+    private ComboBox cboProfile;
+    private Button btnProfileNew;
+    private Button btnProfileDelete;
+    private Button btnProfileSave;
+
     private Button btnLogin;
-    private Button btnLoadFields;
     private Button btnTest;
+    private ComboBox cboArchive;
+    private ComboBox cboDateField;
+    private Button btnLoadFields;
+
     private Button btnSave;
+    private Button btnReload;
+
+    private Button btnExportNow;
+    private Button btnDryRun;
+    private Button btnVerify;
+    private Button btnRetry;
+    private Button btnCancel;
+    private Button btnZip;
+    private Button btnManifest;
+    private ProgressBar progressBar;
 
     private Button btnSvcInstall;
     private Button btnSvcStart;
     private Button btnSvcStop;
     private Button btnSvcUninstall;
-
     private Label lblServiceStatus;
     private Label lblProgress;
-    private TextBox txtLog;
 
+    private LinkLabel lnkAuthor;
+    private TextBox txtLog;
+    private TabControl tabs;
     private System.Windows.Forms.Timer statusTimer;
 
     protected override void Dispose(bool disposing)
@@ -51,187 +55,179 @@ partial class MainForm
     private void InitializeComponent()
     {
         components = new System.ComponentModel.Container();
+        SuspendLayout();
 
-        // Hilfsfunktionen für ein konsistentes Layout.
-        int labelW = 150;
-        int ctrlX = 170;
-        int ctrlW = 360;
-        int rowH = 30;
-        int y = 15;
-
-        Label MakeLabel(string text, int yy)
+        Label Lbl(Control parent, string text, int x, int y, int w = 160, Font? f = null, Color? color = null)
         {
             var l = new Label
             {
-                Text = text,
-                Left = 12,
-                Top = yy + 3,
-                Width = labelW,
-                AutoSize = false
+                Text = text, Left = x, Top = y + 3, Width = w, AutoSize = false,
+                Font = f ?? Theme.Base(), ForeColor = color ?? Theme.Text, BackColor = Color.Transparent
             };
-            Controls.Add(l);
+            parent.Controls.Add(l);
             return l;
         }
-
-        // Server
-        MakeLabel("Server:", y);
-        txtServer = new TextBox { Left = ctrlX, Top = y, Width = ctrlW };
-        Controls.Add(txtServer); y += rowH;
-
-        // Organisation
-        MakeLabel("Organisation:", y);
-        txtOrganization = new TextBox { Left = ctrlX, Top = y, Width = ctrlW };
-        Controls.Add(txtOrganization); y += rowH;
-
-        // Benutzer
-        MakeLabel("Benutzer:", y);
-        txtUser = new TextBox { Left = ctrlX, Top = y, Width = ctrlW };
-        Controls.Add(txtUser); y += rowH;
-
-        // Passwort
-        MakeLabel("Passwort:", y);
-        txtPassword = new TextBox { Left = ctrlX, Top = y, Width = ctrlW, UseSystemPasswordChar = true };
-        Controls.Add(txtPassword); y += rowH;
-
-        // AuthMode
-        MakeLabel("Authentifizierung:", y);
-        cboAuthMode = new ComboBox
+        void Section(Control parent, string text, int x, int y) => parent.Controls.Add(new Label
         {
-            Left = ctrlX, Top = y, Width = 160,
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
-        cboAuthMode.Items.AddRange(new object[] { "Auto", "Cookie", "Token" });
-        Controls.Add(cboAuthMode); y += rowH;
+            Text = text, Left = x, Top = y, AutoSize = true,
+            Font = Theme.Section(), ForeColor = Theme.Accent, BackColor = Color.Transparent
+        });
 
-        // Anmelden-Button (lädt Schränke)
-        btnLogin = new Button { Text = "Anmelden / Schränke laden", Left = ctrlX, Top = y, Width = 200 };
-        btnLogin.Click += BtnLogin_Click;
-        Controls.Add(btnLogin);
-        btnTest = new Button { Text = "Verbindung testen", Left = ctrlX + 210, Top = y, Width = 150 };
-        btnTest.Click += BtnTest_Click;
-        Controls.Add(btnTest);
-        y += rowH + 5;
+        const int cardW = 788;
 
-        // Aktenschrank-Auswahl
-        MakeLabel("Aktenschrank:", y);
-        cboFileCabinet = new ComboBox
+        // ---------- Header ----------
+        var header = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Accent };
+        header.Controls.Add(new Label { Text = "DwDocExport", Left = 18, Top = 9, AutoSize = true, Font = Theme.Title(), ForeColor = Color.White, BackColor = Color.Transparent });
+        header.Controls.Add(new Label { Text = "DocuWare-Dokumente im Originalformat exportieren · Cloud & On-Premise", Left = 20, Top = 39, AutoSize = true, Font = Theme.Subtitle(), ForeColor = Color.FromArgb(214, 230, 246), BackColor = Color.Transparent });
+
+        // ---------- Tabs ----------
+        tabs = new TabControl { Dock = DockStyle.Fill, Font = Theme.Base(), Padding = new Point(14, 6) };
+        var tabSettings = new TabPage("  Einstellungen  ") { BackColor = Theme.Bg, Padding = new Padding(12) };
+        var tabConn = new TabPage("  Verbindung & Archiv  ") { BackColor = Theme.Bg, Padding = new Padding(12) };
+        var tabRun = new TabPage("  Ausführen & Dienst  ") { BackColor = Theme.Bg, Padding = new Padding(12) };
+        var tabLog = new TabPage("  Protokoll  ") { BackColor = Theme.Bg, Padding = new Padding(12) };
+        tabs.TabPages.AddRange(new[] { tabSettings, tabConn, tabRun, tabLog });
+
+        // ----- Tab Einstellungen -----
+        Lbl(tabSettings, "Alle Einstellungen – nach Kategorie gruppiert. Geheimnisse werden verschlüsselt gespeichert.", 12, 6, 780, Theme.Subtitle(), Theme.Subtle);
+        propGrid = new PropertyGrid
         {
-            Left = ctrlX, Top = y, Width = ctrlW,
-            DropDownStyle = ComboBoxStyle.DropDownList
+            Left = 12, Top = 32, Width = cardW, Height = 470,
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            PropertySort = PropertySort.Categorized,
+            ToolbarVisible = true,
+            HelpVisible = true
         };
-        cboFileCabinet.SelectedIndexChanged += CboFileCabinet_SelectedIndexChanged;
-        Controls.Add(cboFileCabinet); y += rowH;
+        tabSettings.Controls.Add(propGrid);
+        btnSave = new Button { Text = "Einstellungen speichern", Left = 12, Top = 510, Width = 200, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
+        btnSave.Click += BtnSave_Click; tabSettings.Controls.Add(btnSave);
+        btnReload = new Button { Text = "Neu laden", Left = 222, Top = 510, Width = 120, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
+        btnReload.Click += BtnReload_Click; tabSettings.Controls.Add(btnReload);
 
-        // Indexfeld für Datumsordner
-        MakeLabel("Datumsfeld (Ordner):", y);
-        cboDateField = new ComboBox { Left = ctrlX, Top = y, Width = 250, DropDownStyle = ComboBoxStyle.DropDown };
-        Controls.Add(cboDateField);
-        btnLoadFields = new Button { Text = "Indexfelder laden", Left = ctrlX + 260, Top = y, Width = 100 };
-        btnLoadFields.Click += BtnLoadFields_Click;
-        Controls.Add(btnLoadFields);
-        y += rowH;
+        // ----- Tab Verbindung & Archiv -----
+        var cardConn = Theme.CardPanel(12, 12, cardW, 210);
+        tabConn.Controls.Add(cardConn);
+        Section(cardConn, "Schritt 1 – Anmelden", 16, 12);
+        btnLogin = new Button { Text = "Anmelden / Archive laden", Left = 16, Top = 44, Width = 240 };
+        btnLogin.Click += BtnLogin_Click; cardConn.Controls.Add(btnLogin);
+        btnTest = new Button { Text = "Verbindung testen", Left = 268, Top = 44, Width = 170 };
+        btnTest.Click += BtnTest_Click; cardConn.Controls.Add(btnTest);
+        Lbl(cardConn, "Die Verbindungsdaten werden im Tab \"Einstellungen\" gepflegt.", 16, 80, 740, Theme.Subtitle(), Theme.Subtle);
 
-        // Ausgabeordner
-        MakeLabel("Ausgabeordner:", y);
-        txtOutputRoot = new TextBox { Left = ctrlX, Top = y, Width = ctrlW };
-        Controls.Add(txtOutputRoot); y += rowH;
+        Section(cardConn, "Schritt 2 – Archiv & Datumsfeld", 16, 108);
+        Lbl(cardConn, "Archiv:", 16, 140, 90);
+        cboArchive = new ComboBox { Left = 110, Top = 140, Width = 660, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        cboArchive.SelectedIndexChanged += CboArchive_SelectedIndexChanged; cardConn.Controls.Add(cboArchive);
+        Lbl(cardConn, "Datumsfeld:", 16, 172, 90);
+        cboDateField = new ComboBox { Left = 110, Top = 172, Width = 510, DropDownStyle = ComboBoxStyle.DropDown };
+        cardConn.Controls.Add(cboDateField);
+        btnLoadFields = new Button { Text = "Indexfelder laden", Left = 628, Top = 171, Width = 142 };
+        btnLoadFields.Click += BtnLoadFields_Click; cardConn.Controls.Add(btnLoadFields);
 
-        // Status-DB
-        MakeLabel("Status-DB (SQLite):", y);
-        txtStateDb = new TextBox { Left = ctrlX, Top = y, Width = ctrlW };
-        Controls.Add(txtStateDb); y += rowH;
+        // ----- Tab Ausführen & Dienst -----
+        var cardProfile = Theme.CardPanel(12, 12, cardW, 88);
+        tabRun.Controls.Add(cardProfile);
+        Section(cardProfile, "Profil (Job)", 16, 12);
+        Lbl(cardProfile, "Profil:", 16, 46, 60);
+        cboProfile = new ComboBox { Left = 80, Top = 46, Width = 250, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        cboProfile.SelectedIndexChanged += CboProfile_SelectedIndexChanged; cardProfile.Controls.Add(cboProfile);
+        btnProfileNew = new Button { Text = "Neu", Left = 340, Top = 45, Width = 90 };
+        btnProfileNew.Click += BtnProfileNew_Click; cardProfile.Controls.Add(btnProfileNew);
+        btnProfileDelete = new Button { Text = "Löschen", Left = 436, Top = 45, Width = 100 };
+        btnProfileDelete.Click += BtnProfileDelete_Click; cardProfile.Controls.Add(btnProfileDelete);
+        btnProfileSave = new Button { Text = "Als Profil speichern", Left = 542, Top = 45, Width = 170 };
+        btnProfileSave.Click += BtnProfileSave_Click; cardProfile.Controls.Add(btnProfileSave);
 
-        // Hash-Tiefe
-        MakeLabel("Hash-Unterordner (0-2):", y);
-        numHashDepth = new NumericUpDown { Left = ctrlX, Top = y, Width = 80, Minimum = 0, Maximum = 2 };
-        Controls.Add(numHashDepth); y += rowH;
+        var cardRun = Theme.CardPanel(12, 108, cardW, 170);
+        tabRun.Controls.Add(cardRun);
+        Section(cardRun, "Ausführen", 16, 12);
+        btnExportNow = new Button { Text = "Export jetzt", Left = 16, Top = 44, Width = 150 };
+        btnExportNow.Click += BtnExportNow_Click; cardRun.Controls.Add(btnExportNow);
+        btnDryRun = new Button { Text = "Trockenlauf", Left = 172, Top = 44, Width = 140 };
+        btnDryRun.Click += BtnDryRun_Click; cardRun.Controls.Add(btnDryRun);
+        btnVerify = new Button { Text = "Verifizieren", Left = 318, Top = 44, Width = 140 };
+        btnVerify.Click += BtnVerify_Click; cardRun.Controls.Add(btnVerify);
+        btnRetry = new Button { Text = "Fehler erneut", Left = 464, Top = 44, Width = 150 };
+        btnRetry.Click += BtnRetry_Click; cardRun.Controls.Add(btnRetry);
+        btnCancel = new Button { Text = "Abbrechen", Left = 620, Top = 44, Width = 150 };
+        btnCancel.Click += BtnCancel_Click; cardRun.Controls.Add(btnCancel);
 
-        // PageSize
-        MakeLabel("Seitengröße:", y);
-        numPageSize = new NumericUpDown { Left = ctrlX, Top = y, Width = 100, Minimum = 1, Maximum = 5000 };
-        Controls.Add(numPageSize); y += rowH;
+        btnZip = new Button { Text = "Als ZIP packen", Left = 16, Top = 84, Width = 160 };
+        btnZip.Click += BtnZip_Click; cardRun.Controls.Add(btnZip);
+        btnManifest = new Button { Text = "Manifest schreiben", Left = 182, Top = 84, Width = 180 };
+        btnManifest.Click += BtnManifest_Click; cardRun.Controls.Add(btnManifest);
 
-        // Delay
-        MakeLabel("Verzögerung (ms):", y);
-        numDelay = new NumericUpDown { Left = ctrlX, Top = y, Width = 100, Minimum = 0, Maximum = 60000 };
-        Controls.Add(numDelay); y += rowH;
+        progressBar = new ProgressBar { Left = 16, Top = 124, Width = 754, Height = 18, Style = ProgressBarStyle.Continuous };
+        cardRun.Controls.Add(progressBar);
 
-        // Retries
-        MakeLabel("Max. Wiederholungen:", y);
-        numRetries = new NumericUpDown { Left = ctrlX, Top = y, Width = 80, Minimum = 0, Maximum = 20 };
-        Controls.Add(numRetries); y += rowH;
+        var cardSvc = Theme.CardPanel(12, 286, cardW, 120);
+        tabRun.Controls.Add(cardSvc);
+        Section(cardSvc, "Windows-Dienst", 16, 12);
+        btnSvcInstall = new Button { Text = "Installieren", Left = 16, Top = 42, Width = 150 };
+        btnSvcInstall.Click += BtnSvcInstall_Click; cardSvc.Controls.Add(btnSvcInstall);
+        btnSvcStart = new Button { Text = "Starten", Left = 172, Top = 42, Width = 140 };
+        btnSvcStart.Click += BtnSvcStart_Click; cardSvc.Controls.Add(btnSvcStart);
+        btnSvcStop = new Button { Text = "Stoppen", Left = 318, Top = 42, Width = 140 };
+        btnSvcStop.Click += BtnSvcStop_Click; cardSvc.Controls.Add(btnSvcStop);
+        btnSvcUninstall = new Button { Text = "Deinstallieren", Left = 464, Top = 42, Width = 160 };
+        btnSvcUninstall.Click += BtnSvcUninstall_Click; cardSvc.Controls.Add(btnSvcUninstall);
+        lblServiceStatus = new Label { Text = "Dienststatus: –", Left = 16, Top = 86, Width = 360, Font = Theme.Base() };
+        cardSvc.Controls.Add(lblServiceStatus);
+        lblProgress = new Label { Text = "Fortschritt: –", Left = 384, Top = 86, Width = 390, Font = Theme.Base() };
+        cardSvc.Controls.Add(lblProgress);
 
-        // Rescan
-        MakeLabel("Nachscannen (Min, 0=einmal):", y);
-        numRescan = new NumericUpDown { Left = ctrlX, Top = y, Width = 100, Minimum = 0, Maximum = 100000 };
-        Controls.Add(numRescan); y += rowH;
-
-        // DownloadPerSection
-        chkPerSection = new CheckBox { Text = "Pro Sektion herunterladen", Left = ctrlX, Top = y, Width = 250 };
-        Controls.Add(chkPerSection); y += rowH;
-
-        // Speichern-Button
-        btnSave = new Button { Text = "Speichern", Left = ctrlX, Top = y, Width = 120 };
-        btnSave.Click += BtnSave_Click;
-        Controls.Add(btnSave); y += rowH + 10;
-
-        // --- Dienststeuerung ---
-        var sep = new Label
-        {
-            Text = "Dienststeuerung",
-            Left = 12, Top = y, Width = 540,
-            BorderStyle = BorderStyle.None,
-            Font = new System.Drawing.Font(Font, System.Drawing.FontStyle.Bold)
-        };
-        Controls.Add(sep); y += 25;
-
-        btnSvcInstall = new Button { Text = "Dienst installieren", Left = 12, Top = y, Width = 130 };
-        btnSvcInstall.Click += BtnSvcInstall_Click;
-        Controls.Add(btnSvcInstall);
-
-        btnSvcStart = new Button { Text = "Dienst starten", Left = 150, Top = y, Width = 120 };
-        btnSvcStart.Click += BtnSvcStart_Click;
-        Controls.Add(btnSvcStart);
-
-        btnSvcStop = new Button { Text = "Dienst stoppen", Left = 278, Top = y, Width = 120 };
-        btnSvcStop.Click += BtnSvcStop_Click;
-        Controls.Add(btnSvcStop);
-
-        btnSvcUninstall = new Button { Text = "Dienst deinstallieren", Left = 406, Top = y, Width = 140 };
-        btnSvcUninstall.Click += BtnSvcUninstall_Click;
-        Controls.Add(btnSvcUninstall);
-        y += rowH + 5;
-
-        lblServiceStatus = new Label { Text = "Dienststatus: -", Left = 12, Top = y, Width = 260 };
-        Controls.Add(lblServiceStatus);
-        lblProgress = new Label { Text = "Fortschritt: -", Left = 290, Top = y, Width = 260 };
-        Controls.Add(lblProgress);
-        y += rowH;
-
-        // --- Log ---
-        var lblLog = new Label { Text = "Meldungen:", Left = 12, Top = y, Width = 120 };
-        Controls.Add(lblLog); y += 22;
-
+        // ----- Tab Protokoll -----
+        var cardLog = Theme.CardPanel(12, 12, cardW, 500);
+        cardLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        tabLog.Controls.Add(cardLog);
+        Section(cardLog, "Protokoll", 16, 12);
         txtLog = new TextBox
         {
-            Left = 12, Top = y, Width = 560, Height = 160,
-            Multiline = true,
-            ScrollBars = ScrollBars.Vertical,
-            ReadOnly = true,
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom
+            Left = 12, Top = 40, Width = cardW - 26, Height = 448,
+            Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true,
+            BorderStyle = BorderStyle.None, BackColor = Theme.InputBg, ForeColor = Theme.Text,
+            Font = new Font("Consolas", 9F),
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
         };
-        Controls.Add(txtLog);
-        y += 170;
+        cardLog.Controls.Add(txtLog);
 
-        // Status-Timer (pollt Dienststatus + Fortschritt).
+        // ---------- Footer ----------
+        var footer = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Card };
+        footer.Controls.Add(new Label { Text = "DwDocExport · .NET 8 · DocuWare Platform REST API", Left = 14, Top = 10, AutoSize = true, Font = Theme.Subtitle(), ForeColor = Theme.Subtle });
+        lnkAuthor = new LinkLabel { Text = "Erstellt von Loheide.eu", AutoSize = true, Top = 10, Left = 640, Anchor = AnchorStyles.Top | AnchorStyles.Right, Font = Theme.Subtitle(), LinkColor = Theme.Accent, ActiveLinkColor = Theme.AccentHover };
+        lnkAuthor.LinkClicked += LnkAuthor_LinkClicked;
+        footer.Controls.Add(lnkAuthor);
+        footer.Resize += (s, e) => lnkAuthor.Left = footer.Width - lnkAuthor.Width - 14;
+
+        // ---------- Wurzel-Layout ----------
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        root.Controls.Add(header, 0, 0);
+        root.Controls.Add(tabs, 0, 1);
+        root.Controls.Add(footer, 0, 2);
+        Controls.Add(root);
+
+        // Button-Stile
+        Theme.Primary(btnLogin); Theme.Primary(btnSave); Theme.Primary(btnExportNow); Theme.Primary(btnSvcStart);
+        foreach (var b in new[] { btnTest, btnLoadFields, btnReload, btnProfileNew, btnProfileDelete, btnProfileSave,
+                                  btnDryRun, btnVerify, btnRetry, btnCancel, btnZip, btnManifest,
+                                  btnSvcInstall, btnSvcStop, btnSvcUninstall })
+            Theme.Secondary(b);
+
         statusTimer = new System.Windows.Forms.Timer(components) { Interval = 2000 };
         statusTimer.Tick += StatusTimer_Tick;
 
-        // --- Formular ---
+        // ---------- Formular ----------
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new System.Drawing.Size(590, y + 15);
+        Font = Theme.Base();
+        BackColor = Theme.Bg;
+        ClientSize = new Size(820, 690);
+        MinimumSize = new Size(836, 640);
         Text = "DwDocExport – DocuWare Dokument-Export";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new System.Drawing.Size(606, 500);
+
+        ResumeLayout(false);
     }
 }
