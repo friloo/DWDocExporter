@@ -2,11 +2,15 @@ name: Build & Release
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, claude/stoic-ride-e145vk ]
     tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+
+# Wird zum Erstellen/Aktualisieren von Releases benötigt.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -44,6 +48,19 @@ jobs:
         with:
           name: DwDocExport-win-x64
           path: publish/DwDocExport.exe
+
+      # Rollendes Beta-Release: bei jedem Push auf den Entwicklungs-Branch wird
+      # die EXE unter einem festen Release ("beta") zum Download bereitgestellt.
+      - name: Beta-Release aktualisieren (Branch-Push)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/claude/stoic-ride-e145vk'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: beta
+          name: "DwDocExport – Beta (aktueller Build)"
+          prerelease: true
+          files: publish/DwDocExport.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
