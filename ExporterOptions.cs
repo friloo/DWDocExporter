@@ -108,6 +108,10 @@ public sealed class ExporterOptions
     [Category("05 Download"), DisplayName("Pro Sektion herunterladen")]
     public bool DownloadPerSection { get; set; } = false;
 
+    [Category("05 Download"), DisplayName("Nur Sektionen mit Endung"),
+     Description("z. B. eml oder eml,msg — lädt nur passende Sektionen einzeln (kein ZIP). Leer = alle.")]
+    public string SectionExtensionFilter { get; set; } = "";
+
     // --- 06 Leistung ---
     [Category("06 Leistung"), DisplayName("Seitengröße")]
     public int PageSize { get; set; } = 500;

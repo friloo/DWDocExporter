@@ -595,7 +595,7 @@ public sealed class DocuWareClient : IDisposable
         return list;
     }
 
-    /// <summary>Liefert die Indexfeld-Namen (DBName) eines Archivs.</summary>
+    /// <summary>Liefert die Indexfeld-Namen (DBFieldName) eines Archivs.</summary>
     public async Task<List<string>> GetFieldNamesAsync(string fileCabinetId, CancellationToken ct)
     {
         using var resp = await SendWithRetryAsync(
@@ -612,9 +612,22 @@ public sealed class DocuWareClient : IDisposable
         {
             foreach (var f in fields.EnumerateArray())
             {
-                var dbName = TryGetString(f, "DBName") ?? TryGetString(f, "DbName");
-                if (!string.IsNullOrEmpty(dbName))
-                    names.Add(dbName);
+                // Technischer Feldname; identisch zum "FieldName" in den Dokumentdaten.
+                // (DocuWare-Schema: DBFieldName, früher fälschlich als DBName gelesen.)
+                var dbName = TryGetString(f, "DBFieldName")
+                             ?? TryGetString(f, "DBName")
+                             ?? TryGetString(f, "DbName");
+                var display = TryGetString(f, "DisplayName") ?? TryGetString(f, "Name");
+                if (string.IsNullOrEmpty(dbName))
+                    continue;
+
+                // Beim Laden im Log auch den Anzeigenamen zeigen, damit das richtige
+                // Feld leichter erkannt wird (das Dropdown nutzt den technischen Namen).
+                if (!string.IsNullOrEmpty(display) &&
+                    !string.Equals(display, dbName, StringComparison.OrdinalIgnoreCase))
+                    _log?.Invoke($"Feld: {dbName}  (Anzeige: {display})");
+
+                names.Add(dbName);
             }
         }
         return names;

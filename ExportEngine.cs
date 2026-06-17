@@ -248,18 +248,43 @@ public sealed class ExportEngine
     private async Task<(string path, string? sha)> ExportDocumentAsync(
         DocuWareClient client, DwDocument doc, CancellationToken ct)
     {
-        if (_opt.DownloadPerSection)
+        var extFilter = ParseExtensionFilter(_opt.SectionExtensionFilter);
+
+        // Ein gesetzter Endungs-Filter erzwingt den Sektions-Download, da der
+        // FileDownload-Endpunkt bei mehreren Sektionen ein ZIP zurückgibt.
+        if (_opt.DownloadPerSection || extFilter.Count > 0)
         {
             var sectionIds = await client.GetSectionIdsAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
             string? lastPath = null;
             string? lastSha = null;
             var index = 0;
+            var saved = 0;
             foreach (var sid in sectionIds)
             {
                 using var dl = await client.OpenSectionDownloadAsync(sid, ct).ConfigureAwait(false);
-                (lastPath, lastSha) = await SaveAsync(doc, dl, index, ct).ConfigureAwait(false);
+                if (extFilter.Count > 0 && !MatchesExtension(dl.FileName, extFilter))
+                    continue;
+
+                // Bei aktivem Filter die erste Treffer-Datei ohne "_sNN"-Suffix speichern
+                // (sauberer Name); weitere Treffer bekommen einen Suffix gegen Kollisionen.
+                int? sectionArg = extFilter.Count > 0
+                    ? (saved == 0 ? (int?)null : saved)
+                    : index;
+
+                (lastPath, lastSha) = await SaveAsync(doc, dl, sectionArg, ct).ConfigureAwait(false);
                 index++;
+                saved++;
             }
+
+            if (extFilter.Count > 0)
+            {
+                // Mit aktivem Filter NICHT auf den (ZIP-)Gesamtdownload zurückfallen.
+                if (saved == 0)
+                    throw new InvalidOperationException(
+                        $"Keine Sektion mit Endung {string.Join("/", extFilter)} gefunden.");
+                return (lastPath!, lastSha);
+            }
+
             if (lastPath == null)
             {
                 using var dl = await client.OpenDocumentDownloadAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
@@ -272,6 +297,23 @@ public sealed class ExportEngine
             using var dl = await client.OpenDocumentDownloadAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
             return await SaveAsync(doc, dl, null, ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>Zerlegt den Endungs-Filter ("eml,msg") in eine normalisierte Menge ("eml","msg").</summary>
+    private static HashSet<string> ParseExtensionFilter(string? raw)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(raw))
+            return set;
+        foreach (var part in raw.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            set.Add(part.TrimStart('.').Trim());
+        return set;
+    }
+
+    private static bool MatchesExtension(string fileName, HashSet<string> extFilter)
+    {
+        var ext = Path.GetExtension(fileName).TrimStart('.');
+        return ext.Length > 0 && extFilter.Contains(ext);
     }
 
     private async Task<(string path, string? sha)> SaveAsync(DwDocument doc, DownloadStream dl, int? section, CancellationToken ct)
