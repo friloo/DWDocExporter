@@ -37,6 +37,9 @@ public sealed record DocumentPage(List<DwDocument> Items, string? NextUrl);
 /// <summary>Kurzinfo zu einem Archiv (DocuWare File Cabinet) – ohne Baskets.</summary>
 public sealed record FileCabinetInfo(string Id, string Name);
 
+/// <summary>Kurzinfo zu einer Dokument-Sektion (für gezielten Download/Filter).</summary>
+public sealed record SectionInfo(string Id, string? FileName, string? ContentType);
+
 /// <summary>
 /// Kapselt sämtliche Kommunikation mit der DocuWare Platform REST API.
 /// Unterstützt Cookie-Login (klassisch / On-Prem) sowie Token-Login über den
@@ -159,7 +162,13 @@ public sealed class DocuWareClient : IDisposable
     /// <summary>Baut den Download-Query-String aus den Optionen (Zielformat, Annotationen).</summary>
     private string DownloadQuery()
     {
-        var fileType = string.IsNullOrWhiteSpace(_opt.TargetFileType) ? "Auto" : _opt.TargetFileType;
+        var fileType = _opt.TargetFileType;
+        // DocuWare kennt nur Auto/PDF/PDFA. "Original" ist KEIN gültiger Wert (führt zu
+        // HTTP 400). "Auto" liefert ohnehin das Originalformat (z. B. EML/MSG/PDF).
+        if (string.IsNullOrWhiteSpace(fileType)
+            || fileType.Equals("Original", StringComparison.OrdinalIgnoreCase)
+            || fileType.Equals("Originalformat", StringComparison.OrdinalIgnoreCase))
+            fileType = "Auto";
         var keep = _opt.KeepAnnotations ? "true" : "false";
         return $"?targetFileType={Uri.EscapeDataString(fileType)}&keepAnnotations={keep}";
     }
@@ -740,29 +749,73 @@ public sealed class DocuWareClient : IDisposable
         return OpenDownloadAsync(url, $"document_{docId}", ct);
     }
 
-    /// <summary>Liefert die Sektions-IDs eines Dokuments (für DownloadPerSection).</summary>
-    public async Task<List<string>> GetSectionIdsAsync(string fileCabinetId, string docId, CancellationToken ct)
+    /// <summary>
+    /// Liefert die Sektionen eines Dokuments. Folgt der HATEOAS-Relation "sections"
+    /// des Dokuments (die korrekte URL kommt vom Server – ein geratener Pfad wie
+    /// .../Documents/{id}/Sections führt je nach Version zu HTTP 404).
+    /// </summary>
+    public async Task<List<SectionInfo>> GetSectionsAsync(string fileCabinetId, string docId, CancellationToken ct)
     {
-        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}/Sections";
+        // 1) Dokumentdetails laden – enthalten die Links (u. a. "sections").
+        var docUrl = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents/{docId}";
+        var docJson = await GetStringAsync(docUrl, ct).ConfigureAwait(false);
+        using var docDoc = JsonDocument.Parse(docJson);
+        var docRoot = docDoc.RootElement;
+
+        // 2) Über die "sections"-Relation die Sektionsliste holen.
+        var sectionsUrl = ExtractLink(docRoot, "sections");
+        if (!string.IsNullOrWhiteSpace(sectionsUrl))
+        {
+            var secJson = await GetStringAsync(sectionsUrl, ct).ConfigureAwait(false);
+            using var secDoc = JsonDocument.Parse(secJson);
+            var list = ParseSections(secDoc.RootElement);
+            if (list.Count > 0)
+                return list;
+        }
+
+        // 3) Fallback: eventuell sind die Sektionen direkt im Dokument eingebettet.
+        return ParseSections(docRoot);
+    }
+
+    /// <summary>Liest eine Sektionsliste aus verschiedenen möglichen JSON-Formen.</summary>
+    private static List<SectionInfo> ParseSections(JsonElement root)
+    {
+        var list = new List<SectionInfo>();
+
+        JsonElement arr;
+        if (root.ValueKind == JsonValueKind.Array)
+            arr = root;
+        else if (root.TryGetProperty("Section", out var s) && s.ValueKind == JsonValueKind.Array)
+            arr = s;
+        else if (root.TryGetProperty("Sections", out var ss))
+        {
+            if (ss.ValueKind == JsonValueKind.Array) arr = ss;
+            else if (ss.TryGetProperty("Section", out var s2) && s2.ValueKind == JsonValueKind.Array) arr = s2;
+            else return list;
+        }
+        else return list;
+
+        foreach (var sec in arr.EnumerateArray())
+        {
+            var id = TryGetString(sec, "Id");
+            if (string.IsNullOrEmpty(id))
+                continue;
+            var fileName = TryGetString(sec, "OriginalFileName")
+                           ?? TryGetString(sec, "FileName")
+                           ?? TryGetString(sec, "Name");
+            var contentType = TryGetString(sec, "ContentType");
+            list.Add(new SectionInfo(id, fileName, contentType));
+        }
+        return list;
+    }
+
+    /// <summary>GET mit Wiederholung und JSON-Accept; liefert den Antworttext.</summary>
+    private async Task<string> GetStringAsync(string url, CancellationToken ct)
+    {
         using var resp = await SendWithRetryAsync(
             () => JsonGet(url), HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
-
-        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        using var doc = JsonDocument.Parse(json);
-
-        var ids = new List<string>();
-        if (doc.RootElement.TryGetProperty("Section", out var arr) &&
-            arr.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var s in arr.EnumerateArray())
-            {
-                var id = TryGetString(s, "Id");
-                if (!string.IsNullOrEmpty(id))
-                    ids.Add(id);
-            }
-        }
-        return ids;
+        return await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>Öffnet den Originalformat-Download einer Sektion (gestreamt).</summary>
@@ -810,15 +863,17 @@ public sealed class DocuWareClient : IDisposable
     }
 
     /// <summary>Sucht im Antwort-Objekt nach dem HATEOAS-Link mit rel="next" und löst ihn auf.</summary>
-    private string? ExtractNextLink(JsonElement root)
+    private string? ExtractNextLink(JsonElement root) => ExtractLink(root, "next");
+
+    /// <summary>Sucht den HATEOAS-Link mit der angegebenen Relation und löst ihn (absolut) auf.</summary>
+    private string? ExtractLink(JsonElement root, string rel)
     {
         if (!root.TryGetProperty("Links", out var links) || links.ValueKind != JsonValueKind.Array)
             return null;
 
         foreach (var link in links.EnumerateArray())
         {
-            var rel = TryGetString(link, "rel");
-            if (!string.Equals(rel, "next", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(TryGetString(link, "rel"), rel, StringComparison.OrdinalIgnoreCase))
                 continue;
 
             var href = TryGetString(link, "href");

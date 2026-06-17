@@ -254,25 +254,31 @@ public sealed class ExportEngine
         // FileDownload-Endpunkt bei mehreren Sektionen ein ZIP zurückgibt.
         if (_opt.DownloadPerSection || extFilter.Count > 0)
         {
-            var sectionIds = await client.GetSectionIdsAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
+            var sections = await client.GetSectionsAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
             string? lastPath = null;
             string? lastSha = null;
-            var index = 0;
             var saved = 0;
-            foreach (var sid in sectionIds)
+            foreach (var sec in sections)
             {
-                using var dl = await client.OpenSectionDownloadAsync(_opt.FileCabinetId, sid, ct).ConfigureAwait(false);
-                if (extFilter.Count > 0 && !MatchesExtension(dl.FileName, extFilter))
+                // Vorabfilter anhand der Metadaten (OriginalFileName) – spart Downloads.
+                if (extFilter.Count > 0 && !string.IsNullOrEmpty(sec.FileName)
+                    && !MatchesExtension(sec.FileName!, extFilter))
+                    continue;
+
+                using var dl = await client.OpenSectionDownloadAsync(_opt.FileCabinetId, sec.Id, ct).ConfigureAwait(false);
+
+                // Falls keine Metadaten vorlagen: nach dem Content-Disposition-Namen prüfen.
+                var effectiveName = !string.IsNullOrEmpty(sec.FileName) ? sec.FileName! : dl.FileName;
+                if (extFilter.Count > 0 && !MatchesExtension(effectiveName, extFilter))
                     continue;
 
                 // Bei aktivem Filter die erste Treffer-Datei ohne "_sNN"-Suffix speichern
                 // (sauberer Name); weitere Treffer bekommen einen Suffix gegen Kollisionen.
                 int? sectionArg = extFilter.Count > 0
                     ? (saved == 0 ? (int?)null : saved)
-                    : index;
+                    : saved;
 
                 (lastPath, lastSha) = await SaveAsync(doc, dl, sectionArg, ct).ConfigureAwait(false);
-                index++;
                 saved++;
             }
 
@@ -280,8 +286,13 @@ public sealed class ExportEngine
             {
                 // Mit aktivem Filter NICHT auf den (ZIP-)Gesamtdownload zurückfallen.
                 if (saved == 0)
+                {
+                    var available = string.Join(", ",
+                        sections.Select(s => s.FileName ?? s.ContentType ?? s.Id));
                     throw new InvalidOperationException(
-                        $"Keine Sektion mit Endung {string.Join("/", extFilter)} gefunden.");
+                        $"Keine Sektion mit Endung {string.Join("/", extFilter)} gefunden. " +
+                        $"Vorhandene Sektionen: {(available.Length > 0 ? available : "(keine)")}.");
+                }
                 return (lastPath!, lastSha);
             }
 

@@ -99,7 +99,7 @@ public sealed class ExporterOptions
     public bool SetFileDateFromField { get; set; } = false;
 
     // --- 05 Download ---
-    [Category("05 Download"), DisplayName("Zielformat"), Description("Auto liefert das Originalformat (z. B. EML/MSG/PDF).")]
+    [Category("05 Download"), DisplayName("Zielformat"), Description("Gültig: Auto, PDF, PDFA. Auto liefert das Originalformat (z. B. EML/MSG/PDF). 'Original' ist KEIN gültiger Wert!")]
     public string TargetFileType { get; set; } = "Auto";
 
     [Category("05 Download"), DisplayName("Annotationen einbrennen")]
