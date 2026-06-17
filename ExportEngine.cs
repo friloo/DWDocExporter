@@ -128,9 +128,20 @@ public sealed class ExportEngine
 
         Report(mode == ExportMode.DryRun ? "Trockenlauf" : "Export", null);
 
+        // Optionales Limit pro Lauf (0 = alle). Begrenzt die Zahl der angestoßenen Dokumente.
+        var maxDocs = Math.Max(0, _opt.MaxDocumentsPerRun);
+        var dispatched = 0;
+
         foreach (var doc in Source())
         {
             ct.ThrowIfCancellationRequested();
+
+            if (maxDocs > 0 && dispatched >= maxDocs)
+            {
+                Log($"Limit erreicht: max. {maxDocs} Dokument(e) pro Lauf.");
+                break;
+            }
+            dispatched++;
 
             if (mode == ExportMode.DryRun)
             {

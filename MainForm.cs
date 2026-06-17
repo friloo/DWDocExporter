@@ -33,6 +33,7 @@ public partial class MainForm : Form
         InitializeComponent();
 
         propGrid.SelectedObject = _opt;
+        SyncQuickControls();
         RefreshProfiles();
         FileLog.Configure(_opt.EffectiveLogPath, FileLog.ParseLevel(_opt.MinLogLevel), _opt.LogMaxSizeMb);
 
@@ -65,6 +66,7 @@ public partial class MainForm : Form
         _activeProfile = cboProfile.SelectedItem?.ToString() ?? ProfileManager.DefaultProfileName;
         _opt = ProfileManager.Load(_activeProfile);
         propGrid.SelectedObject = _opt;
+        SyncQuickControls();
         FileLog.Configure(_opt.EffectiveLogPath, FileLog.ParseLevel(_opt.MinLogLevel), _opt.LogMaxSizeMb);
         cboArchive.Items.Clear();
         ShowSavedArchive();
@@ -127,6 +129,7 @@ public partial class MainForm : Form
     {
         _opt = ProfileManager.Load(_activeProfile);
         propGrid.SelectedObject = _opt;
+        SyncQuickControls();
         cboArchive.Items.Clear();
         ShowSavedArchive();
         Log("Einstellungen neu geladen.");
@@ -212,6 +215,14 @@ public partial class MainForm : Form
             cboDateField.Items.Add("");
             foreach (var f in fields) cboDateField.Items.Add(f);
             cboDateField.Text = current;
+
+            // Auch das Filter-Feld-Dropdown auf Tab 3 mit denselben Feldern füllen.
+            var currentFilter = cboQuickFilterField.Text;
+            cboQuickFilterField.Items.Clear();
+            cboQuickFilterField.Items.Add("");
+            foreach (var f in fields) cboQuickFilterField.Items.Add(f);
+            cboQuickFilterField.Text = currentFilter;
+
             Log($"{fields.Count} Indexfelder geladen.");
         });
     }
@@ -479,5 +490,117 @@ public partial class MainForm : Form
         if (InvokeRequired) { BeginInvoke(new Action<string>(Log), message); return; }
         txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
         FileLog.Write("[GUI] " + message);
+    }
+
+    // =====================================================================
+    //  Tab 3 – Schnelleinstellungen, Filter & Aktionen
+    // =====================================================================
+
+    private bool _syncingQuick;
+
+    /// <summary>Überträgt die aktuellen Optionen in die Schnell-Bedienelemente auf Tab 3.</summary>
+    private void SyncQuickControls()
+    {
+        _syncingQuick = true;
+        try
+        {
+            txtQuickOutput.Text = _opt.OutputRoot;
+            cboQuickFormat.SelectedItem = _opt.TargetFileType;
+            if (cboQuickFormat.SelectedIndex < 0) cboQuickFormat.SelectedItem = "Auto";
+            txtQuickExt.Text = _opt.SectionExtensionFilter;
+            numBatch.Value = Math.Min(numBatch.Maximum, Math.Max(numBatch.Minimum, _opt.MaxDocumentsPerRun));
+            cboQuickFilterField.Text = _opt.FilterDateField;
+            txtQuickFrom.Text = _opt.FilterDateFrom;
+            txtQuickTo.Text = _opt.FilterDateTo;
+        }
+        finally { _syncingQuick = false; }
+    }
+
+    /// <summary>Schreibt Änderungen aus den Schnell-Bedienelementen zurück in die Optionen.</summary>
+    private void QuickChanged(object? sender, EventArgs e)
+    {
+        if (_syncingQuick) return;
+        _opt.OutputRoot = txtQuickOutput.Text.Trim();
+        _opt.TargetFileType = cboQuickFormat.SelectedItem?.ToString() ?? "Auto";
+        _opt.SectionExtensionFilter = txtQuickExt.Text.Trim();
+        _opt.MaxDocumentsPerRun = (int)numBatch.Value;
+        _opt.FilterDateField = cboQuickFilterField.Text.Trim();
+        _opt.FilterDateFrom = txtQuickFrom.Text.Trim();
+        _opt.FilterDateTo = txtQuickTo.Text.Trim();
+        propGrid.Refresh(); // Änderungen sofort auch im Einstellungs-Tab zeigen
+    }
+
+    private void BtnBrowseOutput_Click(object? sender, EventArgs e)
+    {
+        using var fbd = new FolderBrowserDialog { Description = "Ausgabeordner wählen" };
+        if (!string.IsNullOrWhiteSpace(_opt.OutputRoot) && Directory.Exists(_opt.OutputRoot))
+            fbd.SelectedPath = _opt.OutputRoot;
+        if (fbd.ShowDialog(this) == DialogResult.OK)
+            txtQuickOutput.Text = fbd.SelectedPath; // löst QuickChanged aus
+    }
+
+    private async void BtnCountDocs_Click(object? sender, EventArgs e)
+    {
+        if (!ValidateAndReport(false)) return;
+        await RunGuardedAsync("Dokumente zählen", async ct =>
+        {
+            using var client = new DocuWareClient(_opt, Log);
+            await client.AuthenticateAsync(ct);
+            if (string.IsNullOrWhiteSpace(_opt.FileCabinetId))
+            {
+                Log("Kein Archiv gewählt.");
+                return;
+            }
+            var n = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct);
+            lblDocCount.Text = $"Archiv enthält {n} Dokument(e).";
+            Log(lblDocCount.Text);
+        });
+    }
+
+    private void BtnOpenOutput_Click(object? sender, EventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(_opt.OutputRoot);
+            OpenInExplorer(_opt.OutputRoot);
+        }
+        catch (Exception ex) { Log($"Konnte Ausgabeordner nicht öffnen: {ex.Message}"); }
+    }
+
+    private void BtnOpenLog_Click(object? sender, EventArgs e)
+    {
+        try
+        {
+            var path = _opt.EffectiveLogPath;
+            if (File.Exists(path))
+                OpenInExplorer(path, select: true);
+            else
+                OpenInExplorer(Path.GetDirectoryName(path) ?? _opt.OutputRoot);
+        }
+        catch (Exception ex) { Log($"Konnte Logdatei nicht öffnen: {ex.Message}"); }
+    }
+
+    private void BtnResetState_Click(object? sender, EventArgs e)
+    {
+        if (MessageBox.Show(
+                "Status-Datenbank zurücksetzen?\n\nBeim nächsten Lauf werden dann ALLE Dokumente erneut exportiert.",
+                "Status zurücksetzen", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+        try
+        {
+            var p = _opt.StateDbPath;
+            foreach (var f in new[] { p, p + "-wal", p + "-shm" })
+                if (File.Exists(f)) File.Delete(f);
+            Log("Status-Datenbank zurückgesetzt.");
+        }
+        catch (Exception ex) { Log($"Konnte Status-DB nicht zurücksetzen: {ex.Message}"); }
+    }
+
+    private static void OpenInExplorer(string path, bool select = false)
+    {
+        var psi = select
+            ? new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
+            : new ProcessStartInfo(path) { UseShellExecute = true };
+        Process.Start(psi);
     }
 }
