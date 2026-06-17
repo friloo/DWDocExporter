@@ -766,9 +766,10 @@ public sealed class DocuWareClient : IDisposable
     }
 
     /// <summary>Öffnet den Originalformat-Download einer Sektion (gestreamt).</summary>
-    public Task<DownloadStream> OpenSectionDownloadAsync(string sectionId, CancellationToken ct)
+    public Task<DownloadStream> OpenSectionDownloadAsync(string fileCabinetId, string sectionId, CancellationToken ct)
     {
-        var url = $"{PlatformBaseUrl}/Sections/{sectionId}/Data" + DownloadQuery();
+        // Korrekter Endpunkt inkl. FileCabinet-Kontext (ohne diesen liefert die API 404).
+        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Sections/{sectionId}/Data" + DownloadQuery();
         return OpenDownloadAsync(url, $"section_{sectionId}", ct);
     }
 

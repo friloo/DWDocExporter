@@ -261,7 +261,7 @@ public sealed class ExportEngine
             var saved = 0;
             foreach (var sid in sectionIds)
             {
-                using var dl = await client.OpenSectionDownloadAsync(sid, ct).ConfigureAwait(false);
+                using var dl = await client.OpenSectionDownloadAsync(_opt.FileCabinetId, sid, ct).ConfigureAwait(false);
                 if (extFilter.Count > 0 && !MatchesExtension(dl.FileName, extFilter))
                     continue;
 
