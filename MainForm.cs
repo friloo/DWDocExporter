@@ -388,7 +388,11 @@ public partial class MainForm : Form
             if (!ValidateAndReport(true)) return;
             _opt.Save(ProfileManager.PathFor(_activeProfile));
             Log("Konfiguration gespeichert.");
-            var (ok, output) = ServiceManager.Install(Application.ExecutablePath, _opt.ServiceAccount, _opt.ServicePassword);
+            // Bei Single-File-Publish ist Environment.ProcessPath der zuverlässige
+            // Pfad zur tatsächlichen EXE (Application.ExecutablePath kann abweichen).
+            var exePath = Environment.ProcessPath ?? Application.ExecutablePath;
+            Log($"Dienst-EXE: {exePath}");
+            var (ok, output) = ServiceManager.Install(exePath, _opt.ServiceAccount, _opt.ServicePassword);
             Log(output);
             Log(ok ? "Dienst installiert." : "Dienstinstallation fehlgeschlagen.");
         }
