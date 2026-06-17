@@ -60,12 +60,21 @@ public sealed class DocuWareClient : IDisposable
     private string? _refreshToken;
     private string? _tokenEndpoint;
     private DateTimeOffset _tokenExpiresUtc = DateTimeOffset.MinValue;
+    // Vom Identity Service laut OpenID-Discovery tatsächlich unterstützte Scopes.
+    private string[] _supportedScopes = Array.Empty<string>();
+    // Letzter Fehlertext einer Token-Anforderung (für aussagekräftige Meldungen).
+    private string? _lastTokenError;
 
     // Standardparameter für den DocuWare Identity Service (Resource Owner Password Grant).
     // Verifiziert gegen DocuWare-Doku (KBA-37505 / developer.docuware.com OAuth Support).
     private const string DefaultClientId = "docuware.platform.net.client";
-    private const string PasswordScope = "docuware.platform offline_access";
-    private const string ClientCredentialsScope = "docuware.platform";
+    // Wunsch-Scopes; werden vor der Anforderung gegen scopes_supported gefiltert,
+    // damit ein nicht angebotener Scope (z. B. offline_access) keinen invalid_scope auslöst.
+    private static readonly string[] PasswordScopes =
+        { "docuware.platform", "dwprofile", "openid", "offline_access" };
+    private static readonly string[] ClientCredentialsScopes = { "docuware.platform" };
+    // Pflicht-Scope, der immer angefordert wird (auch wenn die Discovery nichts liefert).
+    private const string EssentialScope = "docuware.platform";
 
     /// <summary>Basis-URL der Plattform, z. B. https://server/DocuWare/Platform</summary>
     public string PlatformBaseUrl { get; }
@@ -299,6 +308,17 @@ public sealed class DocuWareClient : IDisposable
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new InvalidOperationException("Kein token_endpoint in der OpenID-Konfiguration gefunden.");
 
+        // Unterstützte Scopes merken, um die Anforderung darauf einzuschränken.
+        if (doc.RootElement.TryGetProperty("scopes_supported", out var scopesEl)
+            && scopesEl.ValueKind == JsonValueKind.Array)
+        {
+            _supportedScopes = scopesEl.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString()!)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToArray();
+        }
+
         return endpoint;
     }
 
@@ -319,7 +339,7 @@ public sealed class DocuWareClient : IDisposable
             form = new Dictionary<string, string>
             {
                 ["grant_type"] = "client_credentials",
-                ["scope"] = ClientCredentialsScope,
+                ["scope"] = BuildScope(ClientCredentialsScopes),
                 ["client_id"] = string.IsNullOrWhiteSpace(_opt.OAuthClientId) ? DefaultClientId : _opt.OAuthClientId,
                 ["client_secret"] = _opt.OAuthClientSecret
             };
@@ -332,7 +352,7 @@ public sealed class DocuWareClient : IDisposable
             form = new Dictionary<string, string>
             {
                 ["grant_type"] = "password",
-                ["scope"] = PasswordScope,
+                ["scope"] = BuildScope(PasswordScopes),
                 ["client_id"] = string.IsNullOrWhiteSpace(_opt.OAuthClientId) ? DefaultClientId : _opt.OAuthClientId,
                 ["username"] = _opt.User,
                 ["password"] = _opt.Password
@@ -342,17 +362,70 @@ public sealed class DocuWareClient : IDisposable
                 form["acr_values"] = $"organization:{_opt.Organization}";
         }
 
+        var body = await PostTokenFormAsync(form, ct).ConfigureAwait(false);
+
+        // Sicherheitsnetz: Lehnt der Server einen Scope ab (invalid_scope), Wiederholung
+        // nur mit dem Pflicht-Scope docuware.platform – das funktioniert auf allen Tenants.
+        if (body is null && form.TryGetValue("scope", out var usedScope)
+            && !string.Equals(usedScope, EssentialScope, StringComparison.OrdinalIgnoreCase))
+        {
+            _log?.Invoke($"Scope \"{usedScope}\" abgelehnt – erneuter Versuch nur mit \"{EssentialScope}\".");
+            form["scope"] = EssentialScope;
+            body = await PostTokenFormAsync(form, ct).ConfigureAwait(false);
+        }
+
+        if (body is null)
+            throw new InvalidOperationException(_lastTokenError ?? "Token-Anforderung fehlgeschlagen.");
+
+        ApplyTokenResponse(body);
+    }
+
+    /// <summary>
+    /// Sendet das Token-Formular. Liefert den Antwort-Body bei Erfolg, andernfalls
+    /// <c>null</c>, wenn der Server den Scope ablehnt (invalid_scope) und ein erneuter
+    /// Versuch sinnvoll ist. Bei allen anderen Fehlern wird eine Ausnahme geworfen.
+    /// </summary>
+    private async Task<string?> PostTokenFormAsync(Dictionary<string, string> form, CancellationToken ct)
+    {
         using var content = new FormUrlEncodedContent(form);
         using var req = new HttpRequestMessage(HttpMethod.Post, _tokenEndpoint) { Content = content };
         req.Headers.Accept.ParseAdd("application/json");
 
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        if (!resp.IsSuccessStatusCode)
-            throw new InvalidOperationException(
-                $"Token-Anforderung fehlgeschlagen (HTTP {(int)resp.StatusCode}). {body}");
 
-        ApplyTokenResponse(body);
+        if (resp.IsSuccessStatusCode)
+            return body;
+
+        _lastTokenError = $"Token-Anforderung fehlgeschlagen (HTTP {(int)resp.StatusCode}). {body}";
+
+        // invalid_scope signalisiert: mit reduziertem Scope erneut versuchen.
+        if (resp.StatusCode == HttpStatusCode.BadRequest
+            && body.IndexOf("invalid_scope", StringComparison.OrdinalIgnoreCase) >= 0)
+            return null;
+
+        throw new InvalidOperationException(_lastTokenError);
+    }
+
+    /// <summary>
+    /// Stellt den Scope-Parameter zusammen. Sind die vom Identity Service angebotenen
+    /// Scopes bekannt (scopes_supported aus der Discovery), werden nur unterstützte
+    /// Wunsch-Scopes angefordert; so kann ein nicht angebotener Scope keinen
+    /// invalid_scope-Fehler verursachen. Andernfalls Rückfall auf den Pflicht-Scope.
+    /// </summary>
+    private string BuildScope(IEnumerable<string> desired)
+    {
+        if (_supportedScopes.Length == 0)
+            return EssentialScope;
+
+        var supported = new HashSet<string>(_supportedScopes, StringComparer.OrdinalIgnoreCase);
+        var selected = desired.Where(supported.Contains).ToList();
+
+        // docuware.platform ist zwingend nötig, auch falls es nicht in der Liste auftaucht.
+        if (!selected.Any(s => string.Equals(s, EssentialScope, StringComparison.OrdinalIgnoreCase)))
+            selected.Insert(0, EssentialScope);
+
+        return string.Join(' ', selected);
     }
 
     /// <summary>Erneuert das Access-Token über das refresh_token (sonst Neuanforderung).</summary>
