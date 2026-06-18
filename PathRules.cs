@@ -105,7 +105,9 @@ public static class PathRules
                 inner = inner.Substring(0, sign);
             if (long.TryParse(inner, out var ms))
             {
-                dt = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+                // Konsistent lokal interpretieren (wie die ISO-Werte unten und
+                // File.SetLastWriteTime); sonst landen Grenzfälle im falschen Monat.
+                dt = DateTimeOffset.FromUnixTimeMilliseconds(ms).LocalDateTime;
                 return true;
             }
         }

@@ -177,17 +177,57 @@ public sealed class ExportStateStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Streamt die erfolgreich exportierten Einträge in Blöcken (Keyset-Paging über
+    /// DocId), ohne alle Zeilen gleichzeitig im Speicher zu halten – wichtig bei
+    /// sehr großen Archiven. Die DB-Sperre wird nur je Block gehalten, nicht während
+    /// der Verarbeitung eines Eintrags.
+    /// </summary>
+    public IEnumerable<DoneEntry> EnumerateDone(int batchSize = 1000)
+    {
+        string? lastId = null;
+        while (true)
+        {
+            var batch = new List<DoneEntry>(batchSize);
+            lock (_lock)
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = lastId == null
+                    ? "SELECT DocId, SavedPath, Sha256, Fields FROM Documents WHERE Status=$s ORDER BY DocId LIMIT $n;"
+                    : "SELECT DocId, SavedPath, Sha256, Fields FROM Documents WHERE Status=$s AND DocId>$last ORDER BY DocId LIMIT $n;";
+                cmd.Parameters.AddWithValue("$s", StatusDone);
+                cmd.Parameters.AddWithValue("$n", batchSize);
+                if (lastId != null) cmd.Parameters.AddWithValue("$last", lastId);
+
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    batch.Add(new DoneEntry(
+                        reader.GetString(0),
+                        reader.IsDBNull(1) ? null : reader.GetString(1),
+                        reader.IsDBNull(2) ? null : reader.GetString(2),
+                        reader.IsDBNull(3) ? null : reader.GetString(3)));
+            }
+
+            if (batch.Count == 0)
+                yield break;
+            foreach (var e in batch)
+                yield return e;
+            lastId = batch[^1].DocId;
+            if (batch.Count < batchSize)
+                yield break;
+        }
+    }
+
     /// <summary>Schreibt ein CSV-Manifest aller exportierten Dokumente.</summary>
     public void ExportManifestCsv(string csvPath)
     {
-        var entries = GetDone();
         var dir = Path.GetDirectoryName(csvPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);
 
         using var w = new StreamWriter(csvPath, false, Encoding.UTF8);
         w.WriteLine("DocId;SavedPath;Sha256");
-        foreach (var e in entries)
+        foreach (var e in EnumerateDone())
             w.WriteLine($"{Csv(e.DocId)};{Csv(e.SavedPath)};{Csv(e.Sha256)}");
     }
 

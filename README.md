@@ -29,7 +29,7 @@ kommt aus dem `Content-Disposition`-Header.
 
 **Kern**
 - 🗂️ **Vollständiger Export** eines Archivs im **Originalformat**, dateityp-neutral
-- ☁️🏢 **Cloud *und* On-Premise** – Token-Login (Identity Service), **App-Registrierung** (Client-Credentials) **und** klassischer Cookie-Login, `AuthMode=Auto`
+- ☁️🏢 **Cloud *und* On-Premise** – **Token-Login** (Identity Service, Standard) mit robuster Scope-Aushandlung, **App-Registrierung** (Client-Credentials); Cookie-Login nur noch als Notnagel (von aktuellen Servern abgelehnt)
 - 🖥️ **Eine EXE, zwei Modi**: moderne **GUI** (Tabs, PropertyGrid, Dunkelmodus) + robuster **Windows-Dienst**
 - 🛡️ **Passwort & alle Secrets verschlüsselt** in der config.json (Windows DPAPI)
 
@@ -37,7 +37,9 @@ kommt aus dem `Content-Disposition`-Header.
 - 🔎 **Filter**: Datumsbereich und beliebige **Indexfeld-Bedingungen** (=, ≠, enthält, beginnt mit)
 - 🧩 **Pfad- & Dateinamen-Vorlagen** mit Platzhaltern: `{Feld:KUNDE}\{yyyy}\{MM}\{DocId}_{Feld:BELEGNR}`
 - 🗃️ **Mehrere Profile/Jobs** – mehrere Archive mit eigener Konfiguration, der Dienst arbeitet alle ab
-- 🎛️ **Download-Optionen**: Zielformat (Auto/PDF/…), Annotationen, pro Sektion, Datei-Datum aus Indexfeld
+- 🎛️ **Download-Optionen**: Zielformat (Auto/PDF/PDFA), Annotationen, pro Sektion, Datei-Datum aus Indexfeld
+- ✉️ **Mailarchiv/Journal**: Endungs-Filter (nur `eml`/`msg`) + **Sektions-Auswahl**, um z. B. den **Journal-Umschlag** automatisch wegzulassen
+- 📦 **Sehr große Archive**: „Max. pro Lauf" (gestaffelt), exakte Zählung über 10.000, optionale **Datums-Stückelung**
 
 **Interaktiv & sicher**
 - ▶️ **Direkt aus der GUI**: Export jetzt · **Trockenlauf** · **Verifizieren** · **Fehler erneut** – mit **Fortschrittsbalken, Durchsatz & Abbrechen**
@@ -85,7 +87,11 @@ kommt aus dem `Content-Disposition`-Header.
 
 ## 🔐 Authentifizierung – Cloud & On-Premise
 
-Einstellung **`AuthMode`**: `Auto` (Standard) · `Cookie` · `Token`.
+Einstellung **`AuthMode`**: `Token` (**Standard, empfohlen**) · `Auto` · `Cookie`.
+
+> ⚠️ **Cookie-Login ist auf aktuellen DocuWare-Versionen/Cloud abgeschaltet**
+> (`/Account/Logon` → **HTTP 410 Gone**). Bitte **`Token`** verwenden. `Auto`
+> versucht zuerst Token und nur als Notnagel Cookie.
 
 ### Token-Login (DocuWare Identity Service) — meist **Cloud** / modernes On-Prem 7.x
 1. `GET {Server}/DocuWare/Platform/Home/IdentityServiceInfo`
@@ -96,11 +102,16 @@ Einstellung **`AuthMode`**: `Auto` (Standard) · `Cookie` · `Token`.
    | Feld | Wert |
    |------|------|
    | `grant_type` | `password` |
-   | `scope` | `docuware.platform offline_access` |
+   | `scope` | dynamisch: gewünschte Scopes (`docuware.platform dwprofile openid offline_access`) werden gegen `scopes_supported` der Discovery gefiltert; Pflicht-Scope `docuware.platform` |
    | `client_id` | `docuware.platform.net.client` |
    | `username` / `password` | Anmeldedaten |
    | `acr_values` | `organization:{Organization}` *(falls Organisation gesetzt)* |
 4. `access_token` → `Authorization: Bearer …` an allen Requests; Erneuerung über `refresh_token`.
+
+> 🔧 **Scope-Robustheit:** Ein fester Scope wie `docuware.platform offline_access`
+> führt je nach Instanz zu `HTTP 400 invalid_scope`. DwDocExport fragt daher nur
+> vom Server angebotene Scopes an und fällt – falls der Server dennoch ablehnt –
+> automatisch auf den Pflicht-Scope `docuware.platform` zurück.
 
 > ✅ **Verifiziert** gegen die offizielle DocuWare-Dokumentation
 > (KBA-37505 *„How to switch from Cookie Authentication to OAuth2"* und
@@ -129,9 +140,9 @@ des Laufs: neu anmelden und Request wiederholen.
 
 | Umgebung | Empfehlung |
 |----------|------------|
-| **DocuWare Cloud** | i. d. R. **Token** |
-| **On-Premise** | oft **Cookie** |
-| **Unsicher?** | **`Auto`** |
+| **DocuWare Cloud** | **Token** |
+| **On-Premise (aktuell, 7.x)** | **Token** |
+| **Sehr alt / unsicher** | **`Auto`** (Token → Cookie) |
 
 ---
 
@@ -153,7 +164,7 @@ Die wichtigsten Schlüssel (Auszug):
 | `Server` | Basis-URL der DocuWare-Instanz | `https://IHR-SERVER.docuware.cloud` |
 | `Organization` | Organisationsname | `IHRE-ORG` |
 | `User` / `Password` | API-Anmeldedaten (Passwort wird verschlüsselt gespeichert) | `api-user` / `GEHEIM` |
-| `AuthMode` | `Auto` / `Cookie` / `Token` | `Auto` |
+| `AuthMode` | `Token` / `Auto` / `Cookie` | `Token` |
 | `OAuthClientId` | Eigene Client-ID (leer = `docuware.platform.net.client`) | `""` |
 | `OAuthClientSecret` | Client-Secret einer App-Registrierung → Client-Credentials-Grant (verschlüsselt) | `""` |
 | `FileCabinetId` | Ziel-Archiv (per Dropdown gewählt) | `""` |
@@ -164,9 +175,15 @@ Die wichtigsten Schlüssel (Auszug):
 | `FolderHashDepth` | Hash-Unterordner: `0` aus · `1`=16 · `2`=256 | `0` |
 | `PageSize` | Dokumente pro API-Seite | `500` |
 | `DelayMs` | Pause zwischen Downloads (ms) | `100` |
-| `MaxRetries` | Wiederholungen bei `429`/`5xx` | `4` |
+| `MaxRetries` | Wiederholungen bei `429`/`5xx` | `6` |
 | `MaxParallelDownloads` | Gleichzeitige Downloads (`1` = sequenziell) | `4` |
+| `MaxDocumentsPerRun` | Max. Dokumente pro Lauf (`0`=alle) – für gestaffelte Großläufe | `0` |
+| `TargetFileType` | Download-Format: `Auto` / `PDF` / `PDFA` (`Auto`=Original) | `Auto` |
 | `DownloadPerSection` | pro Sektion statt Gesamtdatei | `false` |
+| `SectionExtensionFilter` | nur Sektionen mit dieser Endung, z. B. `eml` (kein ZIP) | `""` |
+| `SectionSelection` | bei mehreren passenden Sektionen: `Alle` / `ErsteUeberspringen` / `NurLetzte` / `NurErste` (Journal-Umschlag) | `ErsteUeberspringen` |
+| `DateChunking` | serverseitige Stückelung großer Archive: `Aus` / `Monatlich` / `Jaehrlich` (experimentell) | `Aus` |
+| `ChunkFromDate` | Startdatum der Stückelung (leer = 01.01.2000) | `""` |
 | `WriteMetadataSidecar` | `{Datei}.metadata.json` mit Indexfeldern schreiben | `false` |
 | `Incremental` | beim Nachscannen frühzeitig abbrechen | `false` |
 | `RescanIntervalMinutes` | `0`=einmal · `>0`=periodisch | `0` |
@@ -180,7 +197,7 @@ Die wichtigsten Schlüssel (Auszug):
   "Organization": "MEINE-ORG",
   "User": "api-user",
   "Password": "DPAPI:....(verschlüsselt)....",
-  "AuthMode": "Auto",
+  "AuthMode": "Token",
   "OAuthClientId": "",
   "OAuthClientSecret": "",
   "FileCabinetId": "a1b2c3d4-....",
@@ -191,9 +208,15 @@ Die wichtigsten Schlüssel (Auszug):
   "FolderHashDepth": 0,
   "PageSize": 500,
   "DelayMs": 100,
-  "MaxRetries": 4,
+  "MaxRetries": 6,
   "MaxParallelDownloads": 4,
+  "MaxDocumentsPerRun": 0,
+  "TargetFileType": "Auto",
   "DownloadPerSection": false,
+  "SectionExtensionFilter": "eml",
+  "SectionSelection": "ErsteUeberspringen",
+  "DateChunking": "Aus",
+  "ChunkFromDate": "",
   "WriteMetadataSidecar": false,
   "Incremental": false,
   "RescanIntervalMinutes": 0
@@ -219,7 +242,12 @@ Die GUI ist in vier Tabs gegliedert:
 - **Ausführen & Dienst** –
   - **Profil**: Job auswählen, *Neu* / *Löschen* / *Als Profil speichern*.
   - **Ausführen**: *Export jetzt*, *Trockenlauf*, *Verifizieren*, *Fehler erneut*,
-    *Abbrechen* – mit **Fortschrittsbalken**; dazu *Als ZIP packen* und *Manifest schreiben*.
+    *Abbrechen* – mit **Fortschrittsbalken inkl. Durchsatz/Laufzeit/ETA**; dazu *Als ZIP packen* und *Manifest schreiben*.
+  - **Schnelleinstellungen & Filter** (direkt bedienbar, synchron mit dem PropertyGrid):
+    Ausgabeordner (+Durchsuchen), Zielformat, Endungs-Filter (z. B. `eml`),
+    Sektions-Auswahl, „Max. pro Lauf", sowie ein **Datumsfilter** (Feld + von/bis).
+  - **Aktionen**: *Dokumente zählen* (echte Gesamtzahl, auch >10.000),
+    *Ausgabeordner öffnen*, *Logdatei öffnen*, *Status-DB zurücksetzen*.
   - **Windows-Dienst**: *Installieren / Starten / Stoppen / Deinstallieren*
     (vor *Installieren*/*Starten* wird automatisch gespeichert; optional unter Dienst-Konto).
 - **Protokoll** – Live-Meldungen (auch in die Logdatei geschrieben).
@@ -227,14 +255,26 @@ Die GUI ist in vier Tabs gegliedert:
 Empfohlener Ablauf: **Einstellungen pflegen → Anmelden → Archiv wählen →
 (optional) testen/Trockenlauf → Export jetzt** oder **Dienst installieren/starten**.
 
+### ✉️ Rezept: Mailarchiv / Journal-Postfach (nur die EML, nach Jahr/Monat)
+
+1. **Anmelden** → Archiv wählen → **Indexfelder laden**.
+2. **Datumsfeld** auf das Mail-Datumsfeld setzen (technischer Name aus dem Dropdown).
+3. **Zielformat** = `Auto`, **Nur Sektionen mit Endung** = `eml`.
+4. **Sektions-Auswahl** = `Erste überspringen` (Journal-Umschlag weg) bzw. `Nur letzte`.
+5. **Trockenlauf**, dann **Export jetzt**.
+
+Ergebnis: pro Mail **eine** `.eml` (inkl. eingebetteter Anhänge), abgelegt unter
+`OutputRoot\JJJJ\MM\`. Hat ein Dokument nur **eine** Sektion, bleibt diese erhalten.
+
 ---
 
 ## 🔧 Export-Logik (Dienst)
 
 ```
-Anmelden (Token/Cookie)
-   └─ Dokumente seitenweise:
-         GET /FileCabinets/{fc}/Documents?start={n}&count={PageSize}&calculateTotalCount=true
+Anmelden (Token)
+   └─ Dokumente seitenweise (neueste zuerst, sortOrder=DWSTOREDATETIME Desc):
+         GET /FileCabinets/{fc}/Documents?start=0&count={PageSize}&calculateTotalCount=true&sortOrder=...
+         → Weiterblättern über den HATEOAS-"next"-Link (auch über 10.000 hinaus)
       └─ pro Dokument (sofern noch nicht 'done'):
             GET /FileCabinets/{fc}/Documents/{id}/FileDownload?targetFileType=Auto&keepAnnotations=false
             → Dateiname aus Content-Disposition
@@ -244,8 +284,19 @@ Anmelden (Token/Cookie)
 - **Ordneraufteilung:** `DateFieldName` gesetzt & parsebar → `OutputRoot\JJJJ\MM\`,
   sonst flach (nicht parsebar → `_unsortiert`); optional Hash-Unterordner.
   Dateiname `{DocId}_{Originalname}` (ungültige Zeichen ersetzt, Länge begrenzt).
-- **Pro Sektion** (optional): `/Documents/{id}/Sections` + `/Sections/{sid}/Data`,
-  je Sektion eine Datei mit Suffix `_sNN`.
+- **Pro Sektion / Endungs-Filter:** Sektionen werden über die HATEOAS-Relation
+  `sections` des Dokuments ermittelt und einzeln über
+  `/FileCabinets/{fc}/Sections/{sid}/Data` geladen (umgeht das ZIP bei mehreren
+  Sektionen). Mit `SectionExtensionFilter`/`SectionSelection` lässt sich z. B. der
+  **Journal-Umschlag** herausfiltern.
+- **Sortierung & Inkrementell:** Das Listing ist nach Ablage-Datum absteigend
+  sortiert; im inkrementellen Betrieb wird gestoppt, sobald eine komplett bereits
+  exportierte Seite erreicht ist.
+- **Zählung:** „Dokumente zählen" nutzt `calculateTotalCount`; oberhalb des
+  Cloud-Limits (10.000) wird zur **exakten** Gesamtzahl durchgeblättert.
+- **Datums-Stückelung (experimentell):** zerlegt sehr große Archive serverseitig
+  per `POST /FileCabinets/{fc}/Query/DialogExpression` in Zeitabschnitte
+  (`DWSTOREDATETIME`-Bereiche) – **vor Einsatz per Trockenlauf prüfen**.
 - **Robustheit:** Retry+Backoff bei `429`/`5xx`, Neuanmeldung bei `401`, `DelayMs`
   zwischen Downloads, sauberes `CancellationToken`-Handling.
 
@@ -307,10 +358,15 @@ Anmelden (Token/Cookie)
 - [x] **Proxy/TLS-Optionen** + Dienst-Konto bei Installation
 - [x] **ZIP-Paketierung**, Datei-Datum aus Indexfeld, **Zeitfenster**, Dunkelmodus
 - [x] Unit-Tests + GitHub-Actions-Windows-Build mit Release-Artefakt
+- [x] **Endungs-Filter & Sektions-Auswahl** (Mailarchiv/Journal: nur EML, Umschlag weg)
+- [x] **Exakte Zählung** über das 10.000er-Cloud-Limit hinaus
+- [x] **„Max. pro Lauf"** für gestaffelte Großläufe; **Token** als Auth-Standard
+- [x] **Fortschritt mit Durchsatz/Laufzeit/ETA**; **Tab-3-Schnelleinstellungen & Aktionen**
+- [x] Server-seitige **Datums-Stückelung** via DialogExpression *(experimentell)*
 
 **Mögliche nächste Schritte:**
 
-- [ ] Server-seitiger Filter via DocuWare-DialogExpression (statt clientseitig)
+- [ ] Datums-Stückelung gegen Live-Instanzen härten (Dialog-/Query-Varianten)
 - [ ] Code-Signing der EXE und MSI-/Inno-Setup-Installer
 - [ ] Lokalisierung EN vollständig in der Oberfläche
 

@@ -586,10 +586,10 @@ public sealed class ExportEngine
         var result = new ExportResult();
         var sw = Stopwatch.StartNew();
         using var store = new ExportStateStore(_opt.StateDbPath);
-        var entries = store.GetDone();
-        Log($"Verifikation: {entries.Count} Eintrag/Einträge.");
+        var total = store.CountDone();
+        Log($"Verifikation: {total} Eintrag/Einträge.");
 
-        foreach (var e in entries)
+        foreach (var e in store.EnumerateDone())
         {
             ct.ThrowIfCancellationRequested();
             var path = e.SavedPath;
@@ -614,7 +614,7 @@ public sealed class ExportEngine
                 result.Verified++; // Datei vorhanden, keine gespeicherte Prüfsumme
             }
 
-            progress?.Report(new ExportProgress(result.Verified, result.VerifyFailed, entries.Count,
+            progress?.Report(new ExportProgress(result.Verified, result.VerifyFailed, total,
                 "Verifikation", e.DocId, 0, sw.Elapsed));
         }
 
