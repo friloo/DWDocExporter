@@ -512,6 +512,7 @@ public partial class MainForm : Form
             cboQuickFormat.SelectedItem = _opt.TargetFileType;
             if (cboQuickFormat.SelectedIndex < 0) cboQuickFormat.SelectedItem = "Auto";
             txtQuickExt.Text = _opt.SectionExtensionFilter;
+            cboSectionSel.SelectedIndex = (int)_opt.SectionSelection;
             numBatch.Value = Math.Min(numBatch.Maximum, Math.Max(numBatch.Minimum, _opt.MaxDocumentsPerRun));
             cboQuickFilterField.Text = _opt.FilterDateField;
             txtQuickFrom.Text = _opt.FilterDateFrom;
@@ -527,6 +528,8 @@ public partial class MainForm : Form
         _opt.OutputRoot = txtQuickOutput.Text.Trim();
         _opt.TargetFileType = cboQuickFormat.SelectedItem?.ToString() ?? "Auto";
         _opt.SectionExtensionFilter = txtQuickExt.Text.Trim();
+        if (cboSectionSel.SelectedIndex >= 0)
+            _opt.SectionSelection = (SectionSelection)cboSectionSel.SelectedIndex;
         _opt.MaxDocumentsPerRun = (int)numBatch.Value;
         _opt.FilterDateField = cboQuickFilterField.Text.Trim();
         _opt.FilterDateFrom = txtQuickFrom.Text.Trim();

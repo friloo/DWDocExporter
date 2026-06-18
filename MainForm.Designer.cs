@@ -45,6 +45,7 @@ partial class MainForm
     private Button btnBrowseOutput;
     private ComboBox cboQuickFormat;
     private TextBox txtQuickExt;
+    private ComboBox cboSectionSel;
     private NumericUpDown numBatch;
     private ComboBox cboQuickFilterField;
     private TextBox txtQuickFrom;
@@ -103,21 +104,40 @@ partial class MainForm
         var tabLog = new TabPage("  Protokoll  ") { BackColor = Theme.Bg, Padding = new Padding(12) };
         tabs.TabPages.AddRange(new[] { tabSettings, tabConn, tabRun, tabLog });
 
-        // ----- Tab Einstellungen -----
-        Lbl(tabSettings, "Alle Einstellungen – nach Kategorie gruppiert. Geheimnisse werden verschlüsselt gespeichert.", 12, 6, 780, Theme.Subtitle(), Theme.Subtle);
+        // ----- Tab Einstellungen ----- (Dock-Layout füllt die Höhe -> korrektes Scrollen)
+        var settingsLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Bg
+        };
+        settingsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        settingsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        settingsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+
+        var lblSettingsHint = new Label
+        {
+            Text = "Alle Einstellungen – nach Kategorie gruppiert. Wichtige Optionen findest du auch im Tab \"Ausführen & Dienst\". Eine Zeile anklicken; bei Auswahlfeldern erscheint rechts ein ▼-Pfeil.",
+            Dock = DockStyle.Fill, AutoSize = false, Font = Theme.Subtitle(),
+            ForeColor = Theme.Subtle, BackColor = Color.Transparent
+        };
+        settingsLayout.Controls.Add(lblSettingsHint, 0, 0);
+
         propGrid = new PropertyGrid
         {
-            Left = 12, Top = 32, Width = cardW, Height = 470,
-            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            Dock = DockStyle.Fill,
             PropertySort = PropertySort.Categorized,
             ToolbarVisible = true,
             HelpVisible = true
         };
-        tabSettings.Controls.Add(propGrid);
-        btnSave = new Button { Text = "Einstellungen speichern", Left = 12, Top = 510, Width = 200, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-        btnSave.Click += BtnSave_Click; tabSettings.Controls.Add(btnSave);
-        btnReload = new Button { Text = "Neu laden", Left = 222, Top = 510, Width = 120, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-        btnReload.Click += BtnReload_Click; tabSettings.Controls.Add(btnReload);
+        settingsLayout.Controls.Add(propGrid, 0, 1);
+
+        var pnlSettingsButtons = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
+        btnSave = new Button { Text = "Einstellungen speichern", Left = 0, Top = 8, Width = 200 };
+        btnSave.Click += BtnSave_Click; pnlSettingsButtons.Controls.Add(btnSave);
+        btnReload = new Button { Text = "Neu laden", Left = 210, Top = 8, Width = 120 };
+        btnReload.Click += BtnReload_Click; pnlSettingsButtons.Controls.Add(btnReload);
+        settingsLayout.Controls.Add(pnlSettingsButtons, 0, 2);
+
+        tabSettings.Controls.Add(settingsLayout);
 
         // ----- Tab Verbindung & Archiv -----
         var cardConn = Theme.CardPanel(12, 12, cardW, 210);
@@ -213,6 +233,10 @@ partial class MainForm
         Lbl(cardQuick, "Max. pro Lauf (0=alle):", 580, 80, 160);
         numBatch = new NumericUpDown { Left = 744, Top = 80, Width = 100, Minimum = 0, Maximum = 1000000, BackColor = Theme.InputBg, ForeColor = Theme.Text };
         cardQuick.Controls.Add(numBatch);
+        Lbl(cardQuick, "Sektion:", 860, 80, 70);
+        cboSectionSel = new ComboBox { Left = 930, Top = 80, Width = 190, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        cboSectionSel.Items.AddRange(new object[] { "Alle Sektionen", "Erste überspringen", "Nur letzte", "Nur erste" });
+        cardQuick.Controls.Add(cboSectionSel);
 
         Lbl(cardQuick, "Datumsfilter – Feld:", 16, 120, 140);
         cboQuickFilterField = new ComboBox { Left = 160, Top = 120, Width = 220, DropDownStyle = ComboBoxStyle.DropDown };
@@ -228,6 +252,7 @@ partial class MainForm
         txtQuickOutput.TextChanged += QuickChanged;
         cboQuickFormat.SelectedIndexChanged += QuickChanged;
         txtQuickExt.TextChanged += QuickChanged;
+        cboSectionSel.SelectedIndexChanged += QuickChanged;
         numBatch.ValueChanged += QuickChanged;
         cboQuickFilterField.TextChanged += QuickChanged;
         cboQuickFilterField.SelectedIndexChanged += QuickChanged;

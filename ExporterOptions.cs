@@ -13,6 +13,20 @@ public enum AuthMode { Auto = 0, Cookie = 1, Token = 2 }
 /// <summary>Vergleichsoperator einer Filterbedingung auf einem Indexfeld.</summary>
 public enum FilterOperator { Equals = 0, NotEquals = 1, Contains = 2, StartsWith = 3 }
 
+/// <summary>
+/// Auswahl, welche der (zur Endung passenden) Sektionen gespeichert werden.
+/// Greift nur, wenn mehr als eine passende Sektion existiert – sonst bleibt
+/// die eine Sektion immer erhalten (kein Datenverlust).
+/// Reihenfolge entspricht dem Dropdown auf Tab 3.
+/// </summary>
+public enum SectionSelection
+{
+    Alle = 0,               // alle passenden Sektionen
+    ErsteUeberspringen = 1, // erste weglassen (z. B. Journal-Umschlag), Rest behalten
+    NurLetzte = 2,          // nur die letzte passende Sektion (= eigentliche Mail)
+    NurErste = 3            // nur die erste passende Sektion
+}
+
 /// <summary>Eine Filterbedingung: Feld OP Wert (clientseitig ausgewertet).</summary>
 public sealed class FieldCondition
 {
@@ -112,6 +126,11 @@ public sealed class ExporterOptions
     [Category("05 Download"), DisplayName("Nur Sektionen mit Endung"),
      Description("z. B. eml oder eml,msg — lädt nur passende Sektionen einzeln (kein ZIP). Leer = alle.")]
     public string SectionExtensionFilter { get; set; } = "";
+
+    [Category("05 Download"), DisplayName("Sektions-Auswahl"),
+     Description("Bei mehreren passenden Sektionen: welche gespeichert werden. 'Erste überspringen' entfernt z. B. den Journal-Umschlag. Bei nur einer Sektion bleibt diese immer erhalten.")]
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public SectionSelection SectionSelection { get; set; } = SectionSelection.ErsteUeberspringen;
 
     // --- 06 Leistung ---
     [Category("06 Leistung"), DisplayName("Seitengröße")]
