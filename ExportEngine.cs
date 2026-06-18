@@ -266,16 +266,31 @@ public sealed class ExportEngine
         if (_opt.DownloadPerSection || extFilter.Count > 0)
         {
             var sections = await client.GetSectionsAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
+
+            // Kandidaten (geordnet) bestimmen: bei Endungs-Filter anhand der Metadaten,
+            // sonst alle Sektionen. Sind keine Metadaten-Namen vorhanden, wird die
+            // Endung beim Download (Content-Disposition) geprüft.
+            List<SectionInfo> candidates;
+            if (extFilter.Count == 0)
+            {
+                candidates = sections;
+            }
+            else
+            {
+                var named = sections.Where(s => !string.IsNullOrEmpty(s.FileName)).ToList();
+                candidates = named.Count > 0
+                    ? named.Where(s => MatchesExtension(s.FileName!, extFilter)).ToList()
+                    : sections; // keine Metadaten -> alle, Prüfung beim Download
+            }
+
+            // Sektions-Auswahl anwenden (z. B. Journal-Umschlag = erste überspringen).
+            candidates = ApplySectionSelection(candidates, _opt.SectionSelection);
+
             string? lastPath = null;
             string? lastSha = null;
             var saved = 0;
-            foreach (var sec in sections)
+            foreach (var sec in candidates)
             {
-                // Vorabfilter anhand der Metadaten (OriginalFileName) – spart Downloads.
-                if (extFilter.Count > 0 && !string.IsNullOrEmpty(sec.FileName)
-                    && !MatchesExtension(sec.FileName!, extFilter))
-                    continue;
-
                 using var dl = await client.OpenSectionDownloadAsync(_opt.FileCabinetId, sec.Id, ct).ConfigureAwait(false);
 
                 // Falls keine Metadaten vorlagen: nach dem Content-Disposition-Namen prüfen.
@@ -319,6 +334,23 @@ public sealed class ExportEngine
             using var dl = await client.OpenDocumentDownloadAsync(_opt.FileCabinetId, doc.DocId, ct).ConfigureAwait(false);
             return await SaveAsync(doc, dl, null, ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Wendet die Sektions-Auswahl an. Greift nur bei mehr als einer Sektion –
+    /// sonst bleibt die einzelne Sektion immer erhalten (kein Datenverlust).
+    /// </summary>
+    private static List<SectionInfo> ApplySectionSelection(List<SectionInfo> list, SectionSelection sel)
+    {
+        if (list.Count <= 1)
+            return list;
+        return sel switch
+        {
+            SectionSelection.ErsteUeberspringen => list.Skip(1).ToList(),
+            SectionSelection.NurLetzte => new List<SectionInfo> { list[^1] },
+            SectionSelection.NurErste => new List<SectionInfo> { list[0] },
+            _ => list
+        };
     }
 
     /// <summary>Zerlegt den Endungs-Filter ("eml,msg") in eine normalisierte Menge ("eml","msg").</summary>

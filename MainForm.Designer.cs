@@ -45,6 +45,7 @@ partial class MainForm
     private Button btnBrowseOutput;
     private ComboBox cboQuickFormat;
     private TextBox txtQuickExt;
+    private ComboBox cboSectionSel;
     private NumericUpDown numBatch;
     private ComboBox cboQuickFilterField;
     private TextBox txtQuickFrom;
@@ -213,6 +214,10 @@ partial class MainForm
         Lbl(cardQuick, "Max. pro Lauf (0=alle):", 580, 80, 160);
         numBatch = new NumericUpDown { Left = 744, Top = 80, Width = 100, Minimum = 0, Maximum = 1000000, BackColor = Theme.InputBg, ForeColor = Theme.Text };
         cardQuick.Controls.Add(numBatch);
+        Lbl(cardQuick, "Sektion:", 860, 80, 70);
+        cboSectionSel = new ComboBox { Left = 930, Top = 80, Width = 190, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        cboSectionSel.Items.AddRange(new object[] { "Alle Sektionen", "Erste überspringen", "Nur letzte", "Nur erste" });
+        cardQuick.Controls.Add(cboSectionSel);
 
         Lbl(cardQuick, "Datumsfilter – Feld:", 16, 120, 140);
         cboQuickFilterField = new ComboBox { Left = 160, Top = 120, Width = 220, DropDownStyle = ComboBoxStyle.DropDown };
@@ -228,6 +233,7 @@ partial class MainForm
         txtQuickOutput.TextChanged += QuickChanged;
         cboQuickFormat.SelectedIndexChanged += QuickChanged;
         txtQuickExt.TextChanged += QuickChanged;
+        cboSectionSel.SelectedIndexChanged += QuickChanged;
         numBatch.ValueChanged += QuickChanged;
         cboQuickFilterField.TextChanged += QuickChanged;
         cboQuickFilterField.SelectedIndexChanged += QuickChanged;
