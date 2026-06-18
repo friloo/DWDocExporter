@@ -98,7 +98,9 @@ internal static class Theme
     public static void ApplyToGrid(PropertyGrid grid)
     {
         grid.BackColor = Bg;
-        grid.ViewBackColor = InputBg;
+        // Im Dunkelmodus einen mittleren Grauton statt Fast-Schwarz: dadurch hat der
+        // system-gezeichnete Dropdown-Pfeil (▼) in Auswahlfeldern sichtbaren Kontrast.
+        grid.ViewBackColor = _dark ? Color.FromArgb(60, 63, 68) : InputBg;
         grid.ViewForeColor = Text;
         grid.LineColor = Border;
         grid.CategoryForeColor = Accent;

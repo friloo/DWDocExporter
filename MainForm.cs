@@ -314,8 +314,15 @@ public partial class MainForm : Form
         {
             progressBar.Style = ProgressBarStyle.Marquee;
         }
+        static string Hms(TimeSpan t) => $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}";
+
         var totalTxt = p.Total.HasValue ? $" / {p.Total}" : "";
-        lblProgress.Text = $"{p.Phase}: {p.Done}{totalTxt} ({p.DocsPerSec:0.0}/s)";
+        var eta = "";
+        if (p.Total.HasValue && p.Total.Value > 0 && p.DocsPerSec > 0.01 && p.Done < p.Total.Value)
+            eta = $", Rest ~{Hms(TimeSpan.FromSeconds((p.Total.Value - p.Done) / p.DocsPerSec))}";
+
+        lblProgress.Text =
+            $"{p.Phase}: {p.Done}{totalTxt} ({p.DocsPerSec:0.0}/s, Laufzeit {Hms(p.Elapsed)}{eta})";
     }
 
     private void SetRunningUi(bool running)
@@ -558,10 +565,19 @@ public partial class MainForm : Form
                 Log("Kein Archiv gewählt.");
                 return;
             }
-            var n = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct);
-            lblDocCount.Text = $"Archiv enthält {n} Dokument(e).";
-            Log(lblDocCount.Text);
+            Log("Zähle Dokumente … (bei großen Archiven kann das einen Moment dauern)");
+            var n = await client.GetDocumentCountAccurateAsync(_opt.FileCabinetId, ct,
+                running => UpdateDocCount($"Zähle … {running}"));
+            UpdateDocCount($"Archiv enthält {n} Dokument(e).");
+            Log($"Archiv enthält {n} Dokument(e).");
         });
+    }
+
+    /// <summary>Thread-sichere Aktualisierung der Dokumentzahl-Anzeige (Progress läuft im Hintergrund).</summary>
+    private void UpdateDocCount(string text)
+    {
+        if (InvokeRequired) { BeginInvoke(new Action<string>(UpdateDocCount), text); return; }
+        lblDocCount.Text = text;
     }
 
     private void BtnOpenOutput_Click(object? sender, EventArgs e)

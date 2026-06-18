@@ -112,7 +112,13 @@ public sealed class ExportEngine
         Directory.CreateDirectory(_opt.OutputRoot);
 
         int? total = null;
-        try { total = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct).ConfigureAwait(false); }
+        try
+        {
+            var c = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct).ConfigureAwait(false);
+            // DocuWare Cloud deckelt bei 10.000 -> dann ist die Gesamtzahl unbekannt
+            // (kein irreführendes "/10000" anzeigen, lieber Marquee + Durchsatz/Laufzeit).
+            total = c >= 10000 ? (int?)null : c;
+        }
         catch { /* optional */ }
 
         void Report(string phase, string? cur) =>
@@ -232,6 +238,14 @@ public sealed class ExportEngine
             yield break;
         }
 
+        // Experimentell: serverseitige Datums-Stückelung für sehr große Archive.
+        if (_opt.DateChunking != DateChunking.Aus)
+        {
+            foreach (var d in EnumerateByChunks(client, store, ct))
+                yield return d;
+            yield break;
+        }
+
         var pageSize = Math.Max(1, _opt.PageSize);
         var nextUrl = client.BuildFirstPageUrl(_opt.FileCabinetId, pageSize);
 
@@ -253,6 +267,88 @@ public sealed class ExportEngine
 
             nextUrl = page.NextUrl;
         }
+    }
+
+    /// <summary>
+    /// Gestückelte Aufzählung: zerlegt die Abfrage nach Ablage-Datum in Zeitabschnitte
+    /// (neueste zuerst) und blättert je Abschnitt serverseitig. Umgeht das 10.000er-Limit.
+    /// </summary>
+    private IEnumerable<DwDocument> EnumerateByChunks(
+        DocuWareClient client, ExportStateStore store, CancellationToken ct)
+    {
+        var pageSize = Math.Max(1, _opt.PageSize);
+        var from = ParseChunkStart(_opt.ChunkFromDate);
+        var to = DateTime.Now.Date.AddDays(1);
+
+        string? dialogId = null;
+        try { dialogId = client.GetSearchDialogIdAsync(_opt.FileCabinetId, ct).GetAwaiter().GetResult(); }
+        catch (Exception ex) { Log($"Datums-Stückelung nicht möglich: {ex.Message}"); }
+        if (string.IsNullOrEmpty(dialogId)) yield break;
+
+        var ranges = BuildDateRanges(from, to, _opt.DateChunking);
+        ranges.Reverse(); // neueste zuerst (konsistent mit Inkrementell)
+        Log($"Datums-Stückelung: {ranges.Count} Abschnitt(e) von {from:yyyy-MM-dd} bis {to:yyyy-MM-dd}.");
+
+        foreach (var (rFrom, rTo) in ranges)
+        {
+            if (ct.IsCancellationRequested) yield break;
+
+            DocumentPage? page = null;
+            try { page = client.QueryByStoreDateAsync(_opt.FileCabinetId, dialogId!, rFrom, rTo, pageSize, ct).GetAwaiter().GetResult(); }
+            catch (Exception ex) { Log($"FEHLER Abschnitt {rFrom:yyyy-MM-dd}: {ex.Message}"); }
+
+            while (page != null && !ct.IsCancellationRequested)
+            {
+                if (page.Items.Count == 0) break;
+
+                var matched = page.Items.Where(d => DocumentFilter.Matches(d.Fields, _opt)).ToList();
+                var todo = matched.Where(d => !store.IsDone(d.DocId)).ToList();
+
+                // Inkrementell + neueste-zuerst: ab der ersten komplett erledigten Seite ist Schluss.
+                if (_opt.Incremental && matched.Count > 0 && todo.Count == 0)
+                    yield break;
+
+                foreach (var d in todo)
+                    yield return d;
+
+                DocumentPage? nextPage = null;
+                if (!string.IsNullOrEmpty(page.NextUrl))
+                {
+                    try { nextPage = client.GetDocumentsAsync(page.NextUrl!, ct).GetAwaiter().GetResult(); }
+                    catch (Exception ex) { Log($"FEHLER Folgeseite: {ex.Message}"); }
+                }
+                page = nextPage;
+            }
+        }
+    }
+
+    /// <summary>Erzeugt die Zeitabschnitte (aufsteigend) für die Datums-Stückelung.</summary>
+    internal static List<(DateTime From, DateTime To)> BuildDateRanges(DateTime from, DateTime to, DateChunking g)
+    {
+        var list = new List<(DateTime, DateTime)>();
+        var cur = g == DateChunking.Jaehrlich
+            ? new DateTime(from.Year, 1, 1)
+            : new DateTime(from.Year, from.Month, 1);
+        while (cur < to)
+        {
+            var next = g == DateChunking.Jaehrlich ? cur.AddYears(1) : cur.AddMonths(1);
+            list.Add((cur, next < to ? next : to));
+            cur = next;
+        }
+        return list;
+    }
+
+    /// <summary>Parst das Startdatum der Stückelung (deutsche oder ISO-Schreibweise); Standard 01.01.2000.</summary>
+    internal static DateTime ParseChunkStart(string? raw)
+    {
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            if (DateTime.TryParse(raw, CultureInfo.GetCultureInfo("de-DE"), DateTimeStyles.None, out var dt))
+                return dt.Date;
+            if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt2))
+                return dt2.Date;
+        }
+        return new DateTime(2000, 1, 1);
     }
 
     /// <summary>Exportiert ein Dokument; liefert gespeicherten Pfad und (optional) SHA-256.</summary>
@@ -340,7 +436,7 @@ public sealed class ExportEngine
     /// Wendet die Sektions-Auswahl an. Greift nur bei mehr als einer Sektion –
     /// sonst bleibt die einzelne Sektion immer erhalten (kein Datenverlust).
     /// </summary>
-    private static List<SectionInfo> ApplySectionSelection(List<SectionInfo> list, SectionSelection sel)
+    internal static List<SectionInfo> ApplySectionSelection(List<SectionInfo> list, SectionSelection sel)
     {
         if (list.Count <= 1)
             return list;
@@ -354,7 +450,7 @@ public sealed class ExportEngine
     }
 
     /// <summary>Zerlegt den Endungs-Filter ("eml,msg") in eine normalisierte Menge ("eml","msg").</summary>
-    private static HashSet<string> ParseExtensionFilter(string? raw)
+    internal static HashSet<string> ParseExtensionFilter(string? raw)
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(raw))
@@ -364,7 +460,7 @@ public sealed class ExportEngine
         return set;
     }
 
-    private static bool MatchesExtension(string fileName, HashSet<string> extFilter)
+    internal static bool MatchesExtension(string fileName, HashSet<string> extFilter)
     {
         var ext = Path.GetExtension(fileName).TrimStart('.');
         return ext.Length > 0 && extFilter.Contains(ext);
@@ -490,10 +586,10 @@ public sealed class ExportEngine
         var result = new ExportResult();
         var sw = Stopwatch.StartNew();
         using var store = new ExportStateStore(_opt.StateDbPath);
-        var entries = store.GetDone();
-        Log($"Verifikation: {entries.Count} Eintrag/Einträge.");
+        var total = store.CountDone();
+        Log($"Verifikation: {total} Eintrag/Einträge.");
 
-        foreach (var e in entries)
+        foreach (var e in store.EnumerateDone())
         {
             ct.ThrowIfCancellationRequested();
             var path = e.SavedPath;
@@ -518,7 +614,7 @@ public sealed class ExportEngine
                 result.Verified++; // Datei vorhanden, keine gespeicherte Prüfsumme
             }
 
-            progress?.Report(new ExportProgress(result.Verified, result.VerifyFailed, entries.Count,
+            progress?.Report(new ExportProgress(result.Verified, result.VerifyFailed, total,
                 "Verifikation", e.DocId, 0, sw.Elapsed));
         }
 

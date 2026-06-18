@@ -234,6 +234,12 @@ public sealed class DocuWareClient : IDisposable
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
+            // 410 Gone: aktuelle DocuWare-Versionen/Cloud haben den Cookie-Login entfernt.
+            if (resp.StatusCode == HttpStatusCode.Gone)
+                throw new InvalidOperationException(
+                    "Cookie-Login wird von diesem Server nicht mehr unterstützt (HTTP 410). " +
+                    "Bitte Authentifizierung auf \"Token\" stellen.");
+
             var body = await SafeReadAsync(resp).ConfigureAwait(false);
             throw new InvalidOperationException(
                 $"Cookie-Login fehlgeschlagen (HTTP {(int)resp.StatusCode}). {body}");
@@ -677,10 +683,62 @@ public sealed class DocuWareClient : IDisposable
         return 0;
     }
 
-    /// <summary>Baut die URL der ersten Dokumentseite.</summary>
+    /// <summary>
+    /// Liefert die exakte Dokumentzahl. DocuWare deckelt calculateTotalCount in der
+    /// Cloud bei 10.000; wird dieses Limit erreicht, wird zur genauen Zählung in
+    /// Blöcken durchgeblättert und aufsummiert.
+    /// </summary>
+    public async Task<int> GetDocumentCountAccurateAsync(
+        string fileCabinetId, CancellationToken ct, Action<int>? progress = null)
+    {
+        var quick = await GetDocumentCountAsync(fileCabinetId, ct).ConfigureAwait(false);
+        if (quick < 10000)
+            return quick; // unter dem Limit -> bereits exakt
+
+        return await CountDocumentsByPagingAsync(fileCabinetId, ct, progress).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Zählt alle Dokumente durch Blättern (Blockgröße 10.000, der API-Maximalwert)
+    /// über die HATEOAS-"next"-Links. Liefert die exakte Gesamtzahl, auch über 10.000.
+    /// </summary>
+    public async Task<int> CountDocumentsByPagingAsync(
+        string fileCabinetId, CancellationToken ct, Action<int>? progress = null)
+    {
+        const int pageSize = 10000; // Maximalwert pro Anfrage in DocuWare Cloud
+        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents?start=0&count={pageSize}";
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && !string.IsNullOrEmpty(url))
+        {
+            var json = await GetStringAsync(url, ct).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var n = 0;
+            if (root.TryGetProperty("Items", out var items) && items.ValueKind == JsonValueKind.Array)
+                n = items.GetArrayLength();
+
+            total += n;
+            progress?.Invoke(total);
+
+            if (n == 0)
+                break;
+            url = ExtractNextLink(root);
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// Baut die URL der ersten Dokumentseite. Sortiert nach Ablage-Datum absteigend
+    /// (neueste zuerst), damit der inkrementelle Betrieb verlässlich ist: neue
+    /// Dokumente erscheinen vorne, sodass das Stoppen bei einer komplett erledigten
+    /// Seite korrekt nur den bereits exportierten Altbestand betrifft.
+    /// </summary>
     public string BuildFirstPageUrl(string fileCabinetId, int count) =>
         $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents" +
-        $"?start=0&count={count}&calculateTotalCount=true";
+        $"?start=0&count={count}&calculateTotalCount=true" +
+        $"&sortOrder={Uri.EscapeDataString("DWSTOREDATETIME Desc")}";
 
     /// <summary>
     /// Liefert eine Seite Dokumente samt Folge-Link. Per HATEOAS-"next"-Link kann
@@ -688,14 +746,14 @@ public sealed class DocuWareClient : IDisposable
     /// </summary>
     public async Task<DocumentPage> GetDocumentsAsync(string url, CancellationToken ct)
     {
-        using var resp = await SendWithRetryAsync(
-            () => JsonGet(url), HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
-        resp.EnsureSuccessStatusCode();
-
-        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var json = await GetStringAsync(url, ct).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
+        return ParseDocumentPage(doc.RootElement);
+    }
 
+    /// <summary>Parst ein DocumentsQueryResult (Items + "next"-Link) in eine Seite.</summary>
+    private DocumentPage ParseDocumentPage(JsonElement root)
+    {
         var result = new List<DwDocument>();
         if (root.TryGetProperty("Items", out var items) && items.ValueKind == JsonValueKind.Array)
         {
@@ -726,8 +784,86 @@ public sealed class DocuWareClient : IDisposable
             }
         }
 
-        var next = ExtractNextLink(root);
-        return new DocumentPage(result, next);
+        return new DocumentPage(result, ExtractNextLink(root));
+    }
+
+    /// <summary>
+    /// Experimentell: Erste Ergebnisseite einer serverseitigen Suche nach Ablage-Datum
+    /// (DWSTOREDATETIME im Bereich [from, to)) über eine DialogExpression. Folgeseiten
+    /// werden über den "next"-Link via <see cref="GetDocumentsAsync"/> geladen.
+    /// </summary>
+    public async Task<DocumentPage> QueryByStoreDateAsync(
+        string fileCabinetId, string dialogId, DateTime fromInclusive, DateTime toExclusive,
+        int count, CancellationToken ct)
+    {
+        // DocuWare interpretiert zwei Werte eines Datumsfelds als Bereich [von, bis].
+        // Obergrenze exklusiv über minus 1 Sekunde nachbilden.
+        var fromStr = fromInclusive.ToString("yyyy-MM-ddTHH:mm:ss");
+        var toStr = toExclusive.AddSeconds(-1).ToString("yyyy-MM-ddTHH:mm:ss");
+
+        var body = JsonSerializer.Serialize(new
+        {
+            Condition = new[] { new { DBName = "DWSTOREDATETIME", Value = new[] { fromStr, toStr } } },
+            Operation = "And"
+        });
+
+        var sort = Uri.EscapeDataString("DWSTOREDATETIME Desc");
+        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Query/DialogExpression" +
+                  $"?dialogId={Uri.EscapeDataString(dialogId)}&start=0&count={count}&sortOrder={sort}";
+
+        _log?.Invoke($"[Stückelung] Query {fromStr} .. {toStr}");
+
+        using var resp = await SendWithRetryAsync(() =>
+        {
+            var r = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+            };
+            r.Headers.Accept.ParseAdd("application/json");
+            return r;
+        }, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            var err = await SafeReadAsync(resp).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                $"Stückelungs-Query fehlgeschlagen (HTTP {(int)resp.StatusCode}). {err}");
+        }
+
+        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(json);
+        return ParseDocumentPage(doc.RootElement);
+    }
+
+    /// <summary>Ermittelt die ID des (Standard-)Suchdialogs eines Archivs für Query-Calls.</summary>
+    public async Task<string> GetSearchDialogIdAsync(string fileCabinetId, CancellationToken ct)
+    {
+        var json = await GetStringAsync($"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Dialogs", ct)
+            .ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(json);
+
+        if (doc.RootElement.TryGetProperty("Dialog", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            string? firstSearch = null;
+            string? defaultSearch = null;
+            foreach (var d in arr.EnumerateArray())
+            {
+                var type = TryGetString(d, "Type") ?? "";
+                if (type.IndexOf("Search", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                var id = TryGetString(d, "Id");
+                if (string.IsNullOrEmpty(id))
+                    continue;
+                firstSearch ??= id;
+                var isDefault = d.TryGetProperty("IsDefault", out var def) && def.ValueKind == JsonValueKind.True;
+                if (isDefault)
+                    defaultSearch ??= id;
+            }
+            var chosen = defaultSearch ?? firstSearch;
+            if (!string.IsNullOrEmpty(chosen))
+                return chosen!;
+        }
+        throw new InvalidOperationException("Kein Suchdialog im Archiv gefunden (für Datums-Stückelung nötig).");
     }
 
     /// <summary>Lädt die Indexfelder eines einzelnen Dokuments (für erneuten Versuch).</summary>
