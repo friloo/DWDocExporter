@@ -323,7 +323,7 @@ public sealed class ExportEngine
     }
 
     /// <summary>Erzeugt die Zeitabschnitte (aufsteigend) für die Datums-Stückelung.</summary>
-    private static List<(DateTime From, DateTime To)> BuildDateRanges(DateTime from, DateTime to, DateChunking g)
+    internal static List<(DateTime From, DateTime To)> BuildDateRanges(DateTime from, DateTime to, DateChunking g)
     {
         var list = new List<(DateTime, DateTime)>();
         var cur = g == DateChunking.Jaehrlich
@@ -339,7 +339,7 @@ public sealed class ExportEngine
     }
 
     /// <summary>Parst das Startdatum der Stückelung (deutsche oder ISO-Schreibweise); Standard 01.01.2000.</summary>
-    private static DateTime ParseChunkStart(string? raw)
+    internal static DateTime ParseChunkStart(string? raw)
     {
         if (!string.IsNullOrWhiteSpace(raw))
         {
@@ -436,7 +436,7 @@ public sealed class ExportEngine
     /// Wendet die Sektions-Auswahl an. Greift nur bei mehr als einer Sektion –
     /// sonst bleibt die einzelne Sektion immer erhalten (kein Datenverlust).
     /// </summary>
-    private static List<SectionInfo> ApplySectionSelection(List<SectionInfo> list, SectionSelection sel)
+    internal static List<SectionInfo> ApplySectionSelection(List<SectionInfo> list, SectionSelection sel)
     {
         if (list.Count <= 1)
             return list;
@@ -450,7 +450,7 @@ public sealed class ExportEngine
     }
 
     /// <summary>Zerlegt den Endungs-Filter ("eml,msg") in eine normalisierte Menge ("eml","msg").</summary>
-    private static HashSet<string> ParseExtensionFilter(string? raw)
+    internal static HashSet<string> ParseExtensionFilter(string? raw)
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(raw))
@@ -460,7 +460,7 @@ public sealed class ExportEngine
         return set;
     }
 
-    private static bool MatchesExtension(string fileName, HashSet<string> extFilter)
+    internal static bool MatchesExtension(string fileName, HashSet<string> extFilter)
     {
         var ext = Path.GetExtension(fileName).TrimStart('.');
         return ext.Length > 0 && extFilter.Contains(ext);
