@@ -234,6 +234,12 @@ public sealed class DocuWareClient : IDisposable
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
+            // 410 Gone: aktuelle DocuWare-Versionen/Cloud haben den Cookie-Login entfernt.
+            if (resp.StatusCode == HttpStatusCode.Gone)
+                throw new InvalidOperationException(
+                    "Cookie-Login wird von diesem Server nicht mehr unterstützt (HTTP 410). " +
+                    "Bitte Authentifizierung auf \"Token\" stellen.");
+
             var body = await SafeReadAsync(resp).ConfigureAwait(false);
             throw new InvalidOperationException(
                 $"Cookie-Login fehlgeschlagen (HTTP {(int)resp.StatusCode}). {body}");
@@ -723,10 +729,16 @@ public sealed class DocuWareClient : IDisposable
         return total;
     }
 
-    /// <summary>Baut die URL der ersten Dokumentseite.</summary>
+    /// <summary>
+    /// Baut die URL der ersten Dokumentseite. Sortiert nach Ablage-Datum absteigend
+    /// (neueste zuerst), damit der inkrementelle Betrieb verlässlich ist: neue
+    /// Dokumente erscheinen vorne, sodass das Stoppen bei einer komplett erledigten
+    /// Seite korrekt nur den bereits exportierten Altbestand betrifft.
+    /// </summary>
     public string BuildFirstPageUrl(string fileCabinetId, int count) =>
         $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents" +
-        $"?start=0&count={count}&calculateTotalCount=true";
+        $"?start=0&count={count}&calculateTotalCount=true" +
+        $"&sortOrder={Uri.EscapeDataString("DWSTOREDATETIME Desc")}";
 
     /// <summary>
     /// Liefert eine Seite Dokumente samt Folge-Link. Per HATEOAS-"next"-Link kann

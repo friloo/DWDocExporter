@@ -63,9 +63,9 @@ public sealed class ExporterOptions
     [Category("01 Verbindung"), DisplayName("Passwort"), PasswordPropertyText(true)]
     public string Password { get; set; } = "GEHEIM";
 
-    [Category("01 Verbindung"), DisplayName("Authentifizierung"), Description("Auto: zuerst Token, dann Cookie.")]
+    [Category("01 Verbindung"), DisplayName("Authentifizierung"), Description("Token: Identity Service (Standard, empfohlen). Auto: zuerst Token, dann Cookie. Cookie wird von aktuellen DocuWare-Versionen nicht mehr unterstützt.")]
     [JsonConverter(typeof(JsonStringEnumConverter))]
-    public AuthMode AuthMode { get; set; } = AuthMode.Auto;
+    public AuthMode AuthMode { get; set; } = AuthMode.Token;
 
     [Category("01 Verbindung"), DisplayName("OAuth Client-ID"), Description("Leer = docuware.platform.net.client")]
     public string OAuthClientId { get; set; } = "";
@@ -139,8 +139,8 @@ public sealed class ExporterOptions
     [Category("06 Leistung"), DisplayName("Verzögerung (ms)")]
     public int DelayMs { get; set; } = 100;
 
-    [Category("06 Leistung"), DisplayName("Max. Wiederholungen")]
-    public int MaxRetries { get; set; } = 4;
+    [Category("06 Leistung"), DisplayName("Max. Wiederholungen"), Description("Wiederholungen bei Drosselung (429)/Serverfehlern. Für sehr große Läufe ruhig höher.")]
+    public int MaxRetries { get; set; } = 6;
 
     [Category("06 Leistung"), DisplayName("Parallele Downloads")]
     public int MaxParallelDownloads { get; set; } = 4;

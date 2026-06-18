@@ -314,8 +314,15 @@ public partial class MainForm : Form
         {
             progressBar.Style = ProgressBarStyle.Marquee;
         }
+        static string Hms(TimeSpan t) => $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}";
+
         var totalTxt = p.Total.HasValue ? $" / {p.Total}" : "";
-        lblProgress.Text = $"{p.Phase}: {p.Done}{totalTxt} ({p.DocsPerSec:0.0}/s)";
+        var eta = "";
+        if (p.Total.HasValue && p.Total.Value > 0 && p.DocsPerSec > 0.01 && p.Done < p.Total.Value)
+            eta = $", Rest ~{Hms(TimeSpan.FromSeconds((p.Total.Value - p.Done) / p.DocsPerSec))}";
+
+        lblProgress.Text =
+            $"{p.Phase}: {p.Done}{totalTxt} ({p.DocsPerSec:0.0}/s, Laufzeit {Hms(p.Elapsed)}{eta})";
     }
 
     private void SetRunningUi(bool running)

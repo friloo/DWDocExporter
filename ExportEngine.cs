@@ -112,7 +112,13 @@ public sealed class ExportEngine
         Directory.CreateDirectory(_opt.OutputRoot);
 
         int? total = null;
-        try { total = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct).ConfigureAwait(false); }
+        try
+        {
+            var c = await client.GetDocumentCountAsync(_opt.FileCabinetId, ct).ConfigureAwait(false);
+            // DocuWare Cloud deckelt bei 10.000 -> dann ist die Gesamtzahl unbekannt
+            // (kein irreführendes "/10000" anzeigen, lieber Marquee + Durchsatz/Laufzeit).
+            total = c >= 10000 ? (int?)null : c;
+        }
         catch { /* optional */ }
 
         void Report(string phase, string? cur) =>
