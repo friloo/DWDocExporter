@@ -677,6 +677,52 @@ public sealed class DocuWareClient : IDisposable
         return 0;
     }
 
+    /// <summary>
+    /// Liefert die exakte Dokumentzahl. DocuWare deckelt calculateTotalCount in der
+    /// Cloud bei 10.000; wird dieses Limit erreicht, wird zur genauen Zählung in
+    /// Blöcken durchgeblättert und aufsummiert.
+    /// </summary>
+    public async Task<int> GetDocumentCountAccurateAsync(
+        string fileCabinetId, CancellationToken ct, Action<int>? progress = null)
+    {
+        var quick = await GetDocumentCountAsync(fileCabinetId, ct).ConfigureAwait(false);
+        if (quick < 10000)
+            return quick; // unter dem Limit -> bereits exakt
+
+        return await CountDocumentsByPagingAsync(fileCabinetId, ct, progress).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Zählt alle Dokumente durch Blättern (Blockgröße 10.000, der API-Maximalwert)
+    /// über die HATEOAS-"next"-Links. Liefert die exakte Gesamtzahl, auch über 10.000.
+    /// </summary>
+    public async Task<int> CountDocumentsByPagingAsync(
+        string fileCabinetId, CancellationToken ct, Action<int>? progress = null)
+    {
+        const int pageSize = 10000; // Maximalwert pro Anfrage in DocuWare Cloud
+        var url = $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents?start=0&count={pageSize}";
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && !string.IsNullOrEmpty(url))
+        {
+            var json = await GetStringAsync(url, ct).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var n = 0;
+            if (root.TryGetProperty("Items", out var items) && items.ValueKind == JsonValueKind.Array)
+                n = items.GetArrayLength();
+
+            total += n;
+            progress?.Invoke(total);
+
+            if (n == 0)
+                break;
+            url = ExtractNextLink(root);
+        }
+        return total;
+    }
+
     /// <summary>Baut die URL der ersten Dokumentseite.</summary>
     public string BuildFirstPageUrl(string fileCabinetId, int count) =>
         $"{PlatformBaseUrl}/FileCabinets/{fileCabinetId}/Documents" +
