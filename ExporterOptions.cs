@@ -10,6 +10,12 @@ namespace DwDocExport;
 /// <summary>Authentifizierungsmodi. Auto: zuerst Token, dann Cookie.</summary>
 public enum AuthMode { Auto = 0, Cookie = 1, Token = 2 }
 
+/// <summary>
+/// Serverseitige Datums-Stückelung für sehr große Archive: zerlegt die Abfrage
+/// nach Ablage-Datum (DWSTOREDATETIME) in Zeitabschnitte, um Cloud-Limits zu umgehen.
+/// </summary>
+public enum DateChunking { Aus = 0, Monatlich = 1, Jaehrlich = 2 }
+
 /// <summary>Vergleichsoperator einer Filterbedingung auf einem Indexfeld.</summary>
 public enum FilterOperator { Equals = 0, NotEquals = 1, Contains = 2, StartsWith = 3 }
 
@@ -150,6 +156,13 @@ public sealed class ExporterOptions
 
     [Category("06 Leistung"), DisplayName("Max. Dokumente pro Lauf"), Description("0 = alle. Sonst werden pro Lauf höchstens so viele (noch offene) Dokumente verarbeitet, z. B. 50.")]
     public int MaxDocumentsPerRun { get; set; } = 0;
+
+    [Category("06 Leistung"), DisplayName("Datums-Stückelung (experimentell)"), Description("Zerlegt sehr große Archive serverseitig in Zeitabschnitte (nach Ablage-Datum), um Cloud-Limits zu umgehen. ERST per Trockenlauf prüfen!")]
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public DateChunking DateChunking { get; set; } = DateChunking.Aus;
+
+    [Category("06 Leistung"), DisplayName("Stückelung ab Datum"), Description("Startdatum der Stückelung (TT.MM.JJJJ oder JJJJ-MM-TT). Leer = 01.01.2000.")]
+    public string ChunkFromDate { get; set; } = "";
 
     // --- 07 Integrität ---
     [Category("07 Integrität"), DisplayName("SHA-256 berechnen")]

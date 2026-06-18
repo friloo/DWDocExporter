@@ -238,6 +238,14 @@ public sealed class ExportEngine
             yield break;
         }
 
+        // Experimentell: serverseitige Datums-Stückelung für sehr große Archive.
+        if (_opt.DateChunking != DateChunking.Aus)
+        {
+            foreach (var d in EnumerateByChunks(client, store, ct))
+                yield return d;
+            yield break;
+        }
+
         var pageSize = Math.Max(1, _opt.PageSize);
         var nextUrl = client.BuildFirstPageUrl(_opt.FileCabinetId, pageSize);
 
@@ -259,6 +267,88 @@ public sealed class ExportEngine
 
             nextUrl = page.NextUrl;
         }
+    }
+
+    /// <summary>
+    /// Gestückelte Aufzählung: zerlegt die Abfrage nach Ablage-Datum in Zeitabschnitte
+    /// (neueste zuerst) und blättert je Abschnitt serverseitig. Umgeht das 10.000er-Limit.
+    /// </summary>
+    private IEnumerable<DwDocument> EnumerateByChunks(
+        DocuWareClient client, ExportStateStore store, CancellationToken ct)
+    {
+        var pageSize = Math.Max(1, _opt.PageSize);
+        var from = ParseChunkStart(_opt.ChunkFromDate);
+        var to = DateTime.Now.Date.AddDays(1);
+
+        string? dialogId = null;
+        try { dialogId = client.GetSearchDialogIdAsync(_opt.FileCabinetId, ct).GetAwaiter().GetResult(); }
+        catch (Exception ex) { Log($"Datums-Stückelung nicht möglich: {ex.Message}"); }
+        if (string.IsNullOrEmpty(dialogId)) yield break;
+
+        var ranges = BuildDateRanges(from, to, _opt.DateChunking);
+        ranges.Reverse(); // neueste zuerst (konsistent mit Inkrementell)
+        Log($"Datums-Stückelung: {ranges.Count} Abschnitt(e) von {from:yyyy-MM-dd} bis {to:yyyy-MM-dd}.");
+
+        foreach (var (rFrom, rTo) in ranges)
+        {
+            if (ct.IsCancellationRequested) yield break;
+
+            DocumentPage? page = null;
+            try { page = client.QueryByStoreDateAsync(_opt.FileCabinetId, dialogId!, rFrom, rTo, pageSize, ct).GetAwaiter().GetResult(); }
+            catch (Exception ex) { Log($"FEHLER Abschnitt {rFrom:yyyy-MM-dd}: {ex.Message}"); }
+
+            while (page != null && !ct.IsCancellationRequested)
+            {
+                if (page.Items.Count == 0) break;
+
+                var matched = page.Items.Where(d => DocumentFilter.Matches(d.Fields, _opt)).ToList();
+                var todo = matched.Where(d => !store.IsDone(d.DocId)).ToList();
+
+                // Inkrementell + neueste-zuerst: ab der ersten komplett erledigten Seite ist Schluss.
+                if (_opt.Incremental && matched.Count > 0 && todo.Count == 0)
+                    yield break;
+
+                foreach (var d in todo)
+                    yield return d;
+
+                DocumentPage? nextPage = null;
+                if (!string.IsNullOrEmpty(page.NextUrl))
+                {
+                    try { nextPage = client.GetDocumentsAsync(page.NextUrl!, ct).GetAwaiter().GetResult(); }
+                    catch (Exception ex) { Log($"FEHLER Folgeseite: {ex.Message}"); }
+                }
+                page = nextPage;
+            }
+        }
+    }
+
+    /// <summary>Erzeugt die Zeitabschnitte (aufsteigend) für die Datums-Stückelung.</summary>
+    private static List<(DateTime From, DateTime To)> BuildDateRanges(DateTime from, DateTime to, DateChunking g)
+    {
+        var list = new List<(DateTime, DateTime)>();
+        var cur = g == DateChunking.Jaehrlich
+            ? new DateTime(from.Year, 1, 1)
+            : new DateTime(from.Year, from.Month, 1);
+        while (cur < to)
+        {
+            var next = g == DateChunking.Jaehrlich ? cur.AddYears(1) : cur.AddMonths(1);
+            list.Add((cur, next < to ? next : to));
+            cur = next;
+        }
+        return list;
+    }
+
+    /// <summary>Parst das Startdatum der Stückelung (deutsche oder ISO-Schreibweise); Standard 01.01.2000.</summary>
+    private static DateTime ParseChunkStart(string? raw)
+    {
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            if (DateTime.TryParse(raw, CultureInfo.GetCultureInfo("de-DE"), DateTimeStyles.None, out var dt))
+                return dt.Date;
+            if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt2))
+                return dt2.Date;
+        }
+        return new DateTime(2000, 1, 1);
     }
 
     /// <summary>Exportiert ein Dokument; liefert gespeicherten Pfad und (optional) SHA-256.</summary>
