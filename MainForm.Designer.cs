@@ -104,21 +104,40 @@ partial class MainForm
         var tabLog = new TabPage("  Protokoll  ") { BackColor = Theme.Bg, Padding = new Padding(12) };
         tabs.TabPages.AddRange(new[] { tabSettings, tabConn, tabRun, tabLog });
 
-        // ----- Tab Einstellungen -----
-        Lbl(tabSettings, "Alle Einstellungen – nach Kategorie gruppiert. Geheimnisse werden verschlüsselt gespeichert.", 12, 6, 780, Theme.Subtitle(), Theme.Subtle);
+        // ----- Tab Einstellungen ----- (Dock-Layout füllt die Höhe -> korrektes Scrollen)
+        var settingsLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Bg
+        };
+        settingsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        settingsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        settingsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+
+        var lblSettingsHint = new Label
+        {
+            Text = "Alle Einstellungen – nach Kategorie gruppiert. Wichtige Optionen findest du auch im Tab \"Ausführen & Dienst\". Eine Zeile anklicken; bei Auswahlfeldern erscheint rechts ein ▼-Pfeil.",
+            Dock = DockStyle.Fill, AutoSize = false, Font = Theme.Subtitle(),
+            ForeColor = Theme.Subtle, BackColor = Color.Transparent
+        };
+        settingsLayout.Controls.Add(lblSettingsHint, 0, 0);
+
         propGrid = new PropertyGrid
         {
-            Left = 12, Top = 32, Width = cardW, Height = 470,
-            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            Dock = DockStyle.Fill,
             PropertySort = PropertySort.Categorized,
             ToolbarVisible = true,
             HelpVisible = true
         };
-        tabSettings.Controls.Add(propGrid);
-        btnSave = new Button { Text = "Einstellungen speichern", Left = 12, Top = 510, Width = 200, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-        btnSave.Click += BtnSave_Click; tabSettings.Controls.Add(btnSave);
-        btnReload = new Button { Text = "Neu laden", Left = 222, Top = 510, Width = 120, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-        btnReload.Click += BtnReload_Click; tabSettings.Controls.Add(btnReload);
+        settingsLayout.Controls.Add(propGrid, 0, 1);
+
+        var pnlSettingsButtons = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
+        btnSave = new Button { Text = "Einstellungen speichern", Left = 0, Top = 8, Width = 200 };
+        btnSave.Click += BtnSave_Click; pnlSettingsButtons.Controls.Add(btnSave);
+        btnReload = new Button { Text = "Neu laden", Left = 210, Top = 8, Width = 120 };
+        btnReload.Click += BtnReload_Click; pnlSettingsButtons.Controls.Add(btnReload);
+        settingsLayout.Controls.Add(pnlSettingsButtons, 0, 2);
+
+        tabSettings.Controls.Add(settingsLayout);
 
         // ----- Tab Verbindung & Archiv -----
         var cardConn = Theme.CardPanel(12, 12, cardW, 210);

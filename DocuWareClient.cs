@@ -653,14 +653,27 @@ public sealed class DocuWareClient : IDisposable
         var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(json);
 
+        // DocuWare liefert die Gesamtzahl (bei calculateTotalCount=true) in Count.Value.
+        // Frühere Versionen lasen fälschlich Count.Total -> immer 0.
         if (doc.RootElement.TryGetProperty("Count", out var countObj))
         {
             if (countObj.ValueKind == JsonValueKind.Number && countObj.TryGetInt32(out var direct))
                 return direct;
-            if (countObj.ValueKind == JsonValueKind.Object &&
-                countObj.TryGetProperty("Total", out var total) && total.TryGetInt32(out var t))
-                return t;
+            if (countObj.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in new[] { "Value", "Total", "TotalCount" })
+                    if (countObj.TryGetProperty(prop, out var v)
+                        && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n))
+                        return n;
+            }
         }
+
+        // Fallback: Gesamtzahl evtl. direkt als Eigenschaft im Wurzelobjekt.
+        foreach (var prop in new[] { "TotalCount", "Total" })
+            if (doc.RootElement.TryGetProperty(prop, out var v)
+                && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n))
+                return n;
+
         return 0;
     }
 
