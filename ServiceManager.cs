@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.ServiceProcess;
 using System.Threading;
@@ -20,27 +21,36 @@ public static class ServiceManager
     /// </summary>
     public static (bool ok, string output) Install(string exePath, string? account = null, string? password = null)
     {
-        // Anführungszeichen um den Pfad; sc.exe erwartet "binPath= " mit Leerzeichen nach '='.
+        // Wert für "binPath=": vollständiger Pfad in Anführungszeichen plus Argument.
+        // Die ArgumentList-Quotierung von .NET escaped die inneren Anführungszeichen
+        // korrekt zu  "\"C:\Pfad\app.exe\" --service" , was sc.exe/SCM erwartet.
         var binPath = $"\"{exePath}\" --service";
 
-        var args = $"create {ServiceName} binPath= \"{binPath}\" start= auto DisplayName= \"{DisplayName}\"";
+        var argv = new List<string>
+        {
+            "create", ServiceName,
+            "binPath=", binPath,
+            "start=", "auto",
+            "DisplayName=", DisplayName
+        };
         // Optionales Dienst-Konto (z. B. DOMAIN\\user oder gMSA „DOMAIN\\svc$").
         if (!string.IsNullOrWhiteSpace(account))
         {
-            args += $" obj= \"{account}\"";
-            if (!string.IsNullOrWhiteSpace(password))
-                args += $" password= \"{password}\"";
+            argv.Add("obj="); argv.Add(account);
+            if (!string.IsNullOrWhiteSpace(password)) { argv.Add("password="); argv.Add(password); }
         }
 
-        var create = RunSc(args);
+        var create = RunSc(argv.ToArray());
         if (!create.ok)
             return create;
 
         // Beschreibung setzen (optional, ignoriert Fehler).
-        RunSc($"description {ServiceName} \"Exportiert DocuWare-Dokumente im Originalformat.\"");
+        RunSc("description", ServiceName, "Exportiert DocuWare-Dokumente im Originalformat.");
 
         // Automatischer Neustart bei Absturz: nach 5s, 10s, 30s; Reset-Zähler nach 1 Tag.
-        var failure = RunSc($"failure {ServiceName} reset= 86400 actions= restart/5000/restart/10000/restart/30000");
+        var failure = RunSc("failure", ServiceName,
+            "reset=", "86400",
+            "actions=", "restart/5000/restart/10000/restart/30000");
 
         return (true, create.output + Environment.NewLine + failure.output);
     }
@@ -49,7 +59,7 @@ public static class ServiceManager
     public static (bool ok, string output) Uninstall()
     {
         var stop = Stop();
-        var del = RunSc($"delete {ServiceName}");
+        var del = RunSc("delete", ServiceName);
         return (del.ok, stop.output + Environment.NewLine + del.output);
     }
 
@@ -129,20 +139,25 @@ public static class ServiceManager
         }
     }
 
-    /// <summary>Führt sc.exe mit den angegebenen Argumenten aus und sammelt die Ausgabe.</summary>
-    private static (bool ok, string output) RunSc(string arguments)
+    /// <summary>
+    /// Führt sc.exe mit den angegebenen Argumenten aus und sammelt die Ausgabe.
+    /// Nutzt ArgumentList, damit Pfade/Werte mit Leerzeichen und Anführungszeichen
+    /// (insbesondere binPath=) korrekt und ohne manuelles Escaping übergeben werden.
+    /// </summary>
+    private static (bool ok, string output) RunSc(params string[] argv)
     {
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = "sc.exe",
-                Arguments = arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            foreach (var a in argv)
+                psi.ArgumentList.Add(a);
 
             using var p = Process.Start(psi);
             if (p == null)
@@ -152,7 +167,7 @@ public static class ServiceManager
             var stderr = p.StandardError.ReadToEnd();
             p.WaitForExit(15000);
 
-            var text = ($"sc {arguments}\n{stdout}{stderr}").Trim();
+            var text = ($"sc {string.Join(' ', argv)}\n{stdout}{stderr}").Trim();
             return (p.ExitCode == 0, text);
         }
         catch (Exception ex)
